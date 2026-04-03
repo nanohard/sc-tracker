@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Star Citizen Ore Tracker</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1a1a1a; color: #e0e0e0; margin: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { color: #00d2ff; text-align: center; cursor: pointer; }
+        .upload-section { background: #2d2d2d; padding: 20px; border-radius: 8px; margin-bottom: 20px; text-align: center; border: 2px dashed #444; }
+        .upload-section:hover { border-color: #00d2ff; }
+        #image-preview { max-width: 100%; display: none; margin: 10px auto; border: 1px solid #444; border-radius: 4px; }
+        button { background: #00d2ff; color: #1a1a1a; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #0099cc; }
+        button.secondary { background: #555; color: white; }
+        button.danger { background: #ff4444; color: white; }
+        .yield-list { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        .yield-list th, .yield-list td { padding: 12px; text-align: left; border-bottom: 1px solid #444; }
+        .yield-list th { background: #333; color: #00d2ff; }
+        .status { margin-top: 10px; font-style: italic; color: #888; }
+        .raw-text { background: #111; padding: 10px; border-radius: 4px; font-family: monospace; white-space: pre-wrap; font-size: 10px; max-height: 80px; overflow-y: auto; margin-top: 10px; display: none; }
+        .form-row { margin: 10px 0; display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; }
+        input { padding: 8px; border-radius: 4px; border: 1px solid #444; background: #333; color: #fff; width: 120px; }
+        .view { display: none; }
+        .view.active { display: block; }
+        .ore-card { background: #2d2d2d; padding: 15px; border-radius: 8px; margin: 10px; display: inline-block; min-width: 150px; cursor: pointer; border: 1px solid #444; text-align: center; }
+        .ore-card:hover { border-color: #00d2ff; background: #363636; }
+        .ore-card h3 { margin: 0; color: #00d2ff; }
+        .nav-bar { margin-bottom: 20px; display: flex; gap: 10px; justify-content: center; }
+        .clickable-row:hover { background: #3d3d3d; cursor: pointer; }
+        .editable-input { width: 80px; background: transparent; border: 1px solid transparent; color: white; }
+        .editable-input:focus { background: #333; border-color: #00d2ff; }
+        .miner-select { padding: 8px; border-radius: 4px; border: 1px solid #444; background: #333; color: #fff; width: 180px; }
+        .yield-list td button { margin-right: 10px; margin-top: 5px; margin-bottom: 5px; }
+        .yield-list td button:last-child { margin-right: 0; }
+        #file-input { color: transparent; }
+        #file-input::-webkit-file-upload-button {
+            background: #00d2ff;
+            color: #1a1a1a;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            visibility: visible;
+        }
+        #review-modal { 
+            display: none; 
+            background: #2d2d2d; 
+            padding: 20px; 
+            border-radius: 8px; 
+            box-shadow: 0 0 20px rgba(0,0,0,0.5); 
+            border: 2px solid #00d2ff; 
+            margin-top: 20px; 
+            text-align: left;
+            overflow-x: auto;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        .yield-list th span {
+            display: inline-block;
+            width: 15px;
+            text-align: center;
+            margin-left: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 id="app-title">SC Ore Tracker</h1>
+
+        <div class="nav-bar">
+            <button id="nav-ores" class="secondary">Ores</button>
+            <button id="nav-stats" class="secondary">Statistics</button>
+            <button id="nav-miners" class="secondary">Manage Miners</button>
+        </div>
+
+        <div id="miner-selection-container" style="text-align: center; margin-bottom: 20px; background: #2d2d2d; padding: 15px; border-radius: 8px; border: 1px solid #444;">
+            <div style="display: flex; gap: 20px; justify-content: center; align-items: center; flex-wrap: wrap;">
+                <div>
+                    <label style="margin-right: 10px; font-weight: bold;">Active Miner:</label>
+                    <select id="global-miner-select" class="miner-select">
+                        <option value="">Select a Miner...</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="margin-right: 10px; font-weight: bold;">Active Location:</label>
+                    <input type="text" id="global-location-select" class="miner-select" list="location-list" placeholder="Select Location...">
+                </div>
+            </div>
+            <p style="font-size: 0.8em; color: #888; margin-top: 5px;">These will be attached to all new entries.</p>
+        </div>
+
+        <div id="upload-container" class="upload-section">
+            <p>Upload screenshot to record yield</p>
+            <input type="file" id="file-input" accept="image/*">
+            <img id="image-preview">
+
+            <!-- Review Section -->
+            <div id="review-modal">
+                <h3>Review Detected Entries</h3>
+                <p>Verify and correct the data before saving.</p>
+                <table class="yield-list">
+                    <thead>
+                        <tr>
+                            <th>Material</th>
+                            <th>Quality</th>
+                            <th>Yield (cSCU)</th>
+                            <th>Miner</th>
+                            <th>Location</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="review-body">
+                        <!-- Detected entries will go here -->
+                    </tbody>
+                </table>
+                <div class="form-row" style="margin-top: 20px; justify-content: flex-end;">
+                    <button id="review-retry-btn" class="secondary" style="display: none; margin-right: auto;">Retry Current Image</button>
+                    <button id="review-save-all-btn">Save All to Database</button>
+                    <button id="review-cancel-btn" class="secondary">Discard All</button>
+                </div>
+            </div>
+
+            <div id="status" class="status"></div>
+            <div id="raw-text" class="raw-text"></div>
+        </div>
+
+        <!-- Manual Entry Section -->
+        <div id="manual-entry-container" class="upload-section" style="border-style: solid; border-width: 1px;">
+            <h3>Manual Entry</h3>
+            <div class="form-row">
+                <div style="display: flex; flex-direction: column; align-items: flex-start;">
+                    <label>Material:</label>
+                    <input type="text" id="manual-mat" list="mineral-list" placeholder="Ore name...">
+                    <datalist id="mineral-list">
+                        <option value="Agricium">
+                        <option value="Aluminum">
+                        <option value="Aphorite">
+                        <option value="Aslarite">
+                        <option value="Beryl">
+                        <option value="Bexalite">
+                        <option value="Borase">
+                        <option value="Copper">
+                        <option value="Corundum">
+                        <option value="Diamond">
+                        <option value="Dolivine">
+                        <option value="Gold">
+                        <option value="Hadanite">
+                        <option value="Hephaestanite">
+                        <option value="Iron">
+                        <option value="Janalite">
+                        <option value="Laranite">
+                        <option value="Larotite">
+                        <option value="Magnesium">
+                        <option value="Platinum">
+                        <option value="Quantainium">
+                        <option value="Quartz">
+                        <option value="Savrilium">
+                        <option value="Silver">
+                        <option value="Stileron">
+                        <option value="Tantalite">
+                        <option value="Taranite">
+                        <option value="Titanium">
+                        <option value="Tungsten">
+                        <option value="Zepherite">
+                    </datalist>
+                    <datalist id="location-list">
+                        <option value="Area18">
+                        <option value="Lorville">
+                        <option value="New Babbage">
+                        <option value="Orison">
+                        <option value="Grim HEX">
+                        <option value="Port Tressler">
+                        <option value="Everus Harbor">
+                        <option value="Baijini Point">
+                        <option value="Seraphim Station">
+                        <option value="ARC-L1 Wide Forest Station">
+                        <option value="ARC-L2">
+                        <option value="ARC-L3">
+                        <option value="ARC-L4">
+                        <option value="ARC-L5">
+                        <option value="CRU-L1 Ambitious Dream Station">
+                        <option value="CRU-L2">
+                        <option value="CRU-L3">
+                        <option value="CRU-L4">
+                        <option value="CRU-L5">
+                        <option value="HUR-L1 Green's Glade Station">
+                        <option value="HUR-L2">
+                        <option value="HUR-L3">
+                        <option value="HUR-L4">
+                        <option value="HUR-L5">
+                        <option value="MIC-L1 Shallow Frontier Station">
+                        <option value="MIC-L2">
+                        <option value="MIC-L3">
+                        <option value="MIC-L4">
+                        <option value="MIC-L5">
+                    </datalist>
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: flex-start;">
+                    <label>Location:</label>
+                    <input type="text" id="manual-location" list="location-list" placeholder="Location...">
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: flex-start;">
+                    <label>Quality (0-999):</label>
+                    <input type="number" id="manual-quality" placeholder="e.g. 712">
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: flex-start;">
+                    <label>Yield (cSCU):</label>
+                    <input type="number" id="manual-yield" placeholder="e.g. 8">
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-end; height: 100%;">
+                    <button id="manual-add-btn">Add Entry</button>
+                </div>
+            </div>
+            <div id="manual-status" class="status"></div>
+        </div>
+
+        <!-- Miner Management View -->
+        <div id="view-miner-list" class="view">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2>Manage Miners</h2>
+            </div>
+            <div class="upload-section" style="border-style: solid; border-width: 1px; text-align: left;">
+                <h3>Add New Miner</h3>
+                <div class="form-row" style="justify-content: flex-start;">
+                    <input type="text" id="new-miner-name" placeholder="Miner Name..." style="width: 250px;">
+                    <button id="add-miner-btn">Add Miner</button>
+                </div>
+                <div id="miner-status" class="status"></div>
+            </div>
+            <table class="yield-list">
+                <thead>
+                    <tr>
+                        <th>Miner Name</th>
+                        <th style="width: 150px;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="miner-body">
+                    <!-- Miner rows will go here -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Location List View -->
+        <div id="view-ore-list" class="view active">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2 id="ore-view-title">Storage Locations</h2>
+                <div style="display: flex; gap: 10px;">
+                    <button id="import-csv-btn">Import from CSV</button>
+                    <button id="export-csv-btn">Export to CSV</button>
+                    <button id="clear-db-btn" class="danger">Clear All Data</button>
+                </div>
+            </div>
+            <div id="ore-container">
+                <!-- Location cards will be loaded here -->
+            </div>
+        </div>
+
+        <!-- Miner Details View -->
+        <div id="view-miner-details" class="view">
+            <div class="nav-bar">
+                <button id="back-to-stats" class="secondary">← Back to Statistics</button>
+            </div>
+            <h2 id="current-miner-name">Miner Name</h2>
+            <table class="yield-list">
+                <thead>
+                    <tr>
+                        <th>Material</th>
+                        <th>Quality</th>
+                        <th>Yield (cSCU)</th>
+                        <th>Location</th>
+                        <th>Timestamp</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="miner-details-body">
+                    <!-- Miner specific yields will be loaded here -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Statistics View -->
+        <div id="view-statistics" class="view">
+            <h2>Miner Statistics</h2>
+            <table class="yield-list">
+                <thead>
+                    <tr>
+                        <th id="sort-stats-name" style="cursor: pointer;">Miner Name <span></span></th>
+                        <th id="sort-stats-quality" style="cursor: pointer;">Average Quality <span></span></th>
+                        <th id="sort-stats-yield" style="cursor: pointer;">Total Yield (cSCU) <span></span></th>
+                    </tr>
+                </thead>
+                <tbody id="stats-body">
+                    <!-- Statistics will be loaded here -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Location Details View -->
+        <div id="view-ore-details" class="view">
+            <div class="nav-bar">
+                <button id="back-to-list" class="secondary">← Back to Location List</button>
+            </div>
+            <h2 id="current-ore-name">Ore Name</h2>
+            <table class="yield-list">
+                <thead>
+                    <tr>
+                        <th>Material</th>
+                        <th id="sort-quality" style="cursor: pointer;">Quality <span></span></th>
+                        <th id="sort-yield" style="cursor: pointer;">Yield (cSCU) <span></span></th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="yield-body">
+                    <!-- Yields for specific ore will be loaded here -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Edit Form -->
+        <div id="edit-modal" style="display:none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #2d2d2d; padding: 20px; border-radius: 8px; box-shadow: 0 0 20px rgba(0,0,0,0.5); z-index: 100;">
+            <h3>Edit Entry</h3>
+            <input type="hidden" id="edit-id">
+            <div class="form-row">
+                <label>Material:</label>
+                <input type="text" id="edit-mat">
+            </div>
+            <div class="form-row">
+                <label>Quality:</label>
+                <input type="number" step="1" id="edit-quality">
+            </div>
+            <div class="form-row">
+                <label>Yield (cSCU):</label>
+                <input type="number" step="1" id="edit-yield">
+            </div>
+            <div class="form-row" id="edit-miner-row">
+                <label>Miner:</label>
+                <select id="edit-miner" class="miner-select"></select>
+            </div>
+            <div class="form-row">
+                <label>Location:</label>
+                <input type="text" id="edit-location" list="location-list">
+            </div>
+            <div class="form-row">
+                <button id="modal-save-btn">Update</button>
+                <button id="modal-cancel-btn" class="secondary">Cancel</button>
+            </div>
+        </div>
+        <!-- Miner Edit Modal -->
+        <div id="miner-edit-modal" style="display:none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #2d2d2d; padding: 20px; border-radius: 8px; box-shadow: 0 0 20px rgba(0,0,0,0.5); z-index: 100;">
+            <h3>Edit Miner Name</h3>
+            <input type="hidden" id="edit-miner-id">
+            <div class="form-row">
+                <label>Name:</label>
+                <input type="text" id="edit-miner-name" style="width: 250px;">
+            </div>
+            <div class="form-row">
+                <button id="miner-modal-save-btn">Update</button>
+                <button id="miner-modal-cancel-btn" class="secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="renderer.js"></script>
+</body>
+</html>

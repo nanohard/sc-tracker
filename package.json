@@ -1,0 +1,42 @@
+{
+  "name": "sc-ore-tracker",
+  "version": "1.0.0",
+  "description": "Star Citizen Ore Tracker",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "build": {
+    "appId": "com.sc.ore.tracker",
+    "productName": "SC Ore Tracker",
+    "win": {
+      "target": "portable",
+      "icon": "icon.ico",
+      "signAndEditExecutable": false
+    },
+    "files": [
+      "main.js",
+      "renderer.js",
+      "database.js",
+      "index.html",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    }
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "jimp": "^1.6.0",
+    "sqlite3": "^6.0.1",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "electron": "^41.1.1",
+    "electron-builder": "^26.8.1"
+  }
+}
