@@ -1,6 +1,6 @@
 {
   "name": "sc-ore-tracker",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Star Citizen Ore Tracker",
   "main": "main.js",
   "scripts": {

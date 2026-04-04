@@ -124,7 +124,7 @@ ipcMain.handle('get-yields-by-location', async (event, { location, sortBy = 'qua
        FROM yields 
        WHERE location = ? 
        GROUP BY material, quality 
-       ORDER BY material ASC, ${actualSortBy} ${actualSortOrder}`,
+       ORDER BY material, ${actualSortBy} ${actualSortOrder}`,
       [location],
       (err, rows) => {
         if (err) reject(err);

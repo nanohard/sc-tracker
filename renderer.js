@@ -70,6 +70,7 @@ const minerSelectionContainer = document.getElementById('miner-selection-contain
 const uploadContainer = document.getElementById('upload-container');
 const manualEntryContainer = document.getElementById('manual-entry-container');
 
+// const sortMaterialHeader = document.getElementById('sort-material');
 const sortQualityHeader = document.getElementById('sort-quality');
 const sortYieldHeader = document.getElementById('sort-yield');
 const sortStatsNameHeader = document.getElementById('sort-stats-name');
@@ -115,6 +116,10 @@ backToStatsBtn.addEventListener('click', () => {
     switchView('statistics');
 });
 
+// sortMaterialHeader.addEventListener('click', () => {
+//     handleSort('material');
+// });
+
 sortQualityHeader.addEventListener('click', () => {
     handleSort('quality');
 });
@@ -146,15 +151,17 @@ function handleSort(column) {
     // Update header arrows
     updateSortIndicators();
     
-    if (currentViewedOre) {
-        loadOreDetails(currentViewedOre);
+    if (currentViewedLocation) {
+        loadLocationDetails(currentViewedLocation);
     }
 }
 
 function updateSortIndicators() {
+    // const materialArrow = sortMaterialHeader.querySelector('span');
     const qualityArrow = sortQualityHeader.querySelector('span');
     const yieldArrow = sortYieldHeader.querySelector('span');
     
+    // if (materialArrow) materialArrow.innerHTML = '&nbsp;';
     if (qualityArrow) qualityArrow.innerHTML = '&nbsp;';
     if (yieldArrow) yieldArrow.innerHTML = '&nbsp;';
     
