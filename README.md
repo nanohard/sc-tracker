@@ -1,6 +1,5 @@
 # Star Citizen Ore Tracker
 
 To Build:
-npm run build -- --win
-
+`npm run dist -- --win`
 
