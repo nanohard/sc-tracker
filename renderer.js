@@ -27,6 +27,14 @@ const importCsvBtn = document.getElementById('import-csv-btn');
 const navOresBtn = document.getElementById('nav-ores');
 const navMinersBtn = document.getElementById('nav-miners');
 const navStatsBtn = document.getElementById('nav-stats');
+const navSyncBtn = document.getElementById('nav-sync');
+const viewSync = document.getElementById('sync-view');
+const localSyncUuidCode = document.getElementById('local-sync-uuid');
+const copySyncUuidBtn = document.getElementById('copy-sync-uuid');
+const peerListDiv = document.getElementById('peer-list');
+const peerUuidInput = document.getElementById('peer-uuid-input');
+const addPeerBtn = document.getElementById('add-peer-button');
+const syncStatusDiv = document.getElementById('sync-status');
 const globalMinerSelect = document.getElementById('global-miner-select');
 const globalLocationSelect = document.getElementById('global-location-select');
 const editMinerSelect = document.getElementById('edit-miner');
@@ -89,8 +97,50 @@ let lastProcessedImagePath = null;
 // Initialize
 loadLocations();
 loadMiners();
+loadSyncSettings();
 updateSortIndicators();
 updateStatsSortIndicators();
+
+ipcRenderer.on('sync-complete', () => {
+    syncStatusDiv.textContent = `Last synced: ${new Date().toLocaleTimeString()}`;
+    loadLocations();
+    loadMiners();
+});
+
+async function loadSyncSettings() {
+    const settings = await ipcRenderer.invoke('get-sync-settings');
+    localSyncUuidCode.textContent = settings.local_sync_uuid || '...';
+    
+    const peerUuids = JSON.parse(settings.peer_uuids || '[]');
+    peerListDiv.innerHTML = '';
+    
+    if (peerUuids.length === 0) {
+        peerListDiv.innerHTML = '<p style="color: #888; margin: 0; font-style: italic;">No peers added yet.</p>';
+    } else {
+        peerUuids.forEach(uuid => {
+            const div = document.createElement('div');
+            div.style.display = 'flex';
+            div.style.justifyContent = 'space-between';
+            div.style.alignItems = 'center';
+            div.style.marginBottom = '5px';
+            div.style.padding = '5px';
+            div.style.background = '#222';
+            div.style.borderRadius = '4px';
+            
+            div.innerHTML = `
+                <span style="font-family: monospace;">${uuid}</span>
+                <button class="secondary delete-btn" style="margin: 0; padding: 2px 8px; font-size: 0.8em;">Remove</button>
+            `;
+            
+            div.querySelector('.delete-btn').addEventListener('click', async () => {
+                await ipcRenderer.invoke('remove-peer-uuid', uuid);
+                loadSyncSettings();
+            });
+            
+            peerListDiv.appendChild(div);
+        });
+    }
+}
 
 appTitle.addEventListener('click', () => {
     switchView('list');
@@ -106,6 +156,28 @@ navMinersBtn.addEventListener('click', () => {
 
 navStatsBtn.addEventListener('click', () => {
     switchView('statistics');
+});
+
+navSyncBtn.addEventListener('click', () => {
+    switchView('sync');
+});
+
+copySyncUuidBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(localSyncUuidCode.textContent);
+    copySyncUuidBtn.textContent = 'Copied!';
+    setTimeout(() => copySyncUuidBtn.textContent = 'Copy', 2000);
+});
+
+addPeerBtn.addEventListener('click', async () => {
+    const peerUuid = peerUuidInput.value.trim();
+    if (!peerUuid) return;
+    const added = await ipcRenderer.invoke('add-peer-uuid', peerUuid);
+    if (added) {
+        peerUuidInput.value = '';
+        loadSyncSettings();
+    } else {
+        alert('Peer already exists or invalid UUID.');
+    }
 });
 
 backToListBtn.addEventListener('click', () => {
@@ -671,6 +743,7 @@ function switchView(view) {
     viewMinerList.classList.remove('active');
     viewStatistics.classList.remove('active');
     viewMinerDetails.classList.remove('active');
+    viewSync.classList.remove('active');
 
     // Toggle global entry sections based on view
     const isEntryVisible = (view === 'list' || view === 'details');
@@ -679,6 +752,12 @@ function switchView(view) {
     uploadContainer.style.display = displayStyle;
     manualEntryContainer.style.display = displayStyle;
     
+    // Manage nav button active states
+    navOresBtn.classList.toggle('secondary', view !== 'list');
+    navMinersBtn.classList.toggle('secondary', view !== 'miners');
+    navStatsBtn.classList.toggle('secondary', view !== 'statistics');
+    navSyncBtn.classList.toggle('secondary', view !== 'sync');
+
     if (view === 'list') {
         viewOreList.classList.add('active');
         loadLocations();
@@ -688,6 +767,9 @@ function switchView(view) {
     } else if (view === 'statistics') {
         viewStatistics.classList.add('active');
         loadMinerStats();
+    } else if (view === 'sync') {
+        viewSync.classList.add('active');
+        loadSyncSettings();
     } else if (view === 'miner-details') {
         viewMinerDetails.classList.add('active');
     } else {
@@ -704,6 +786,8 @@ async function refreshCurrentView() {
         await loadMinerDetails(currentMinerNameHeader.textContent);
     } else if (viewMinerList.classList.contains('active')) {
         await loadMiners();
+    } else if (viewSync.classList.contains('active')) {
+        await loadSyncSettings();
     } else {
         await loadLocations();
     }

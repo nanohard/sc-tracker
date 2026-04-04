@@ -3,9 +3,14 @@ const path = require('path');
 const fs = require('fs');
 const Tesseract = require('tesseract.js');
 const { Jimp } = require('jimp');
-const db = require('./database');
+const hyperswarm = require('hyperswarm');
+const crypto = require('crypto');
+const { db, initPromise } = require('./database');
 
 let mainWindow;
+let swarm;
+const peers = new Set();
+let localSyncUuid;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -21,7 +26,218 @@ function createWindow() {
   mainWindow.loadFile('index.html');
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(async () => {
+  await initPromise;
+  await initSync();
+  createWindow();
+});
+
+async function initSync() {
+  return new Promise((resolve) => {
+    db.serialize(() => {
+      db.get("SELECT value FROM sync_settings WHERE key = 'local_sync_uuid'", (err, row) => {
+        if (row) {
+          localSyncUuid = row.value;
+          startSwarm();
+          resolve();
+        } else {
+          // If missing, generate it (redundancy with database.js)
+          const newUuid = crypto.randomUUID();
+          db.run("INSERT OR IGNORE INTO sync_settings (key, value) VALUES ('local_sync_uuid', ?)", [newUuid], () => {
+            localSyncUuid = newUuid;
+            startSwarm();
+            resolve();
+          });
+        }
+      });
+    });
+  });
+}
+
+function startSwarm() {
+  if (swarm) return;
+  
+  swarm = new hyperswarm();
+  
+  db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
+    if (row) {
+      const peerUuids = JSON.parse(row.value);
+      [localSyncUuid, ...peerUuids].forEach(uuid => {
+        const topic = crypto.createHash('sha256').update(uuid).digest();
+        swarm.join(topic, { lookup: true, announce: true });
+      });
+    }
+  });
+
+  swarm.on('connection', (conn, info) => {
+    console.log('New connection from peer');
+    peers.add(conn);
+    
+    conn.on('data', data => handleSyncData(conn, data));
+    conn.on('close', () => peers.delete(conn));
+    conn.on('error', () => peers.delete(conn));
+
+    // Start sync process
+    initiateSyncWithPeer(conn);
+  });
+
+  // Periodic sync every 10 seconds
+  setInterval(() => {
+    for (const conn of peers) {
+      initiateSyncWithPeer(conn);
+    }
+  }, 10000);
+}
+
+function broadcastSync() {
+  if (peers.size === 0) return;
+  const notification = JSON.stringify({ type: 'sync-notification' });
+  for (const conn of peers) {
+    try {
+      conn.write(notification);
+    } catch (err) {
+      console.error('Failed to send sync notification:', err);
+    }
+  }
+}
+
+async function initiateSyncWithPeer(conn) {
+  const lastSyncTime = await new Promise(resolve => {
+    db.get("SELECT value FROM sync_settings WHERE key = 'last_sync_time'", (err, row) => {
+      resolve(row ? parseInt(row.value) : 0);
+    });
+  });
+
+  conn.write(JSON.stringify({
+    type: 'sync-request',
+    lastSyncTime: lastSyncTime
+  }));
+}
+
+async function handleSyncData(conn, data) {
+  try {
+    const message = JSON.parse(data.toString());
+    
+    if (message.type === 'sync-request') {
+      const peerLastSyncTime = message.lastSyncTime;
+      const updates = await getDatabaseUpdates(peerLastSyncTime);
+      conn.write(JSON.stringify({
+        type: 'sync-response',
+        updates: updates,
+        timestamp: Date.now()
+      }));
+    } else if (message.type === 'sync-response') {
+      await applyDatabaseUpdates(message.updates);
+      db.run("UPDATE sync_settings SET value = ? WHERE key = 'last_sync_time'", [message.timestamp.toString()]);
+      if (mainWindow) mainWindow.webContents.send('sync-complete');
+    } else if (message.type === 'sync-notification') {
+      await initiateSyncWithPeer(conn);
+    }
+  } catch (err) {
+    console.error('Failed to handle sync data:', err);
+  }
+}
+
+async function getDatabaseUpdates(sinceTimestamp) {
+  const sinceStr = new Date(sinceTimestamp).toISOString();
+  
+  const yields = await new Promise(resolve => {
+    db.all("SELECT * FROM yields WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
+  });
+  
+  const miners = await new Promise(resolve => {
+    db.all("SELECT * FROM miners WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
+  });
+
+  return { yields, miners };
+}
+
+async function applyDatabaseUpdates(updates) {
+  const { yields, miners } = updates;
+
+  for (const miner of miners) {
+    await new Promise(resolve => {
+      db.get("SELECT updated_at, is_deleted FROM miners WHERE uuid = ?", [miner.uuid], (err, row) => {
+        if (!row || new Date(miner.updated_at) > new Date(row.updated_at)) {
+          db.run(`
+            INSERT OR REPLACE INTO miners (uuid, name, total_yield, total_quality_sum, record_count, updated_at, is_deleted)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `, [miner.uuid, miner.name, miner.total_yield, miner.total_quality_sum, miner.record_count, miner.updated_at, miner.is_deleted], () => resolve());
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+
+  for (const y of yields) {
+    await new Promise(resolve => {
+      db.get("SELECT updated_at, is_deleted FROM yields WHERE uuid = ?", [y.uuid], (err, row) => {
+        if (!row || new Date(y.updated_at) > new Date(row.updated_at)) {
+          db.run(`
+            INSERT OR REPLACE INTO yields (uuid, material, quality, yield_cscu, miner_name, location, timestamp, updated_at, is_deleted)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `, [y.uuid, y.material, y.quality, y.yield_cscu, y.miner_name, y.location, y.timestamp, y.updated_at, y.is_deleted], () => resolve());
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+}
+
+ipcMain.handle('get-sync-settings', async () => {
+  const settings = {};
+  return new Promise(resolve => {
+    db.all("SELECT key, value FROM sync_settings", (err, rows) => {
+      if (err) {
+        console.error('Error fetching sync settings:', err);
+        resolve(settings);
+        return;
+      }
+      if (rows) {
+        rows.forEach(row => settings[row.key] = row.value);
+      }
+      // If still missing local UUID, and initSync was supposed to handle it
+      if (!settings.local_sync_uuid && localSyncUuid) {
+        settings.local_sync_uuid = localSyncUuid;
+      }
+      resolve(settings);
+    });
+  });
+});
+
+ipcMain.handle('add-peer-uuid', async (event, peerUuid) => {
+  return new Promise(resolve => {
+    db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
+      const peerUuids = JSON.parse(row.value);
+      if (!peerUuids.includes(peerUuid)) {
+        peerUuids.push(peerUuid);
+        db.run("UPDATE sync_settings SET value = ? WHERE key = 'peer_uuids'", [JSON.stringify(peerUuids)], () => {
+          const topic = crypto.createHash('sha256').update(peerUuid).digest();
+          if (swarm) swarm.join(topic, { lookup: true, announce: true });
+          resolve(true);
+        });
+      } else {
+        resolve(false);
+      }
+    });
+  });
+});
+
+ipcMain.handle('remove-peer-uuid', async (event, peerUuid) => {
+  return new Promise(resolve => {
+    db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
+      let peerUuids = JSON.parse(row.value);
+      peerUuids = peerUuids.filter(id => id !== peerUuid);
+      db.run("UPDATE sync_settings SET value = ? WHERE key = 'peer_uuids'", [JSON.stringify(peerUuids)], () => {
+        const topic = crypto.createHash('sha256').update(peerUuid).digest();
+        if (swarm) swarm.leave(topic);
+        resolve(true);
+      });
+    });
+  });
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -103,7 +319,7 @@ ipcMain.handle('process-image', async (event, imagePath) => {
 // Database Operations
 ipcMain.handle('get-locations', async () => {
   return new Promise((resolve, reject) => {
-    db.all('SELECT location, COUNT(DISTINCT material || "_" || quality) as count FROM yields WHERE yield_cscu > 0 GROUP BY location ORDER BY location ASC', (err, rows) => {
+    db.all('SELECT location, COUNT(DISTINCT material || "_" || quality) as count FROM yields WHERE yield_cscu > 0 AND is_deleted = 0 GROUP BY location ORDER BY location ASC', (err, rows) => {
       if (err) reject(err);
       else resolve(rows);
     });
@@ -122,7 +338,7 @@ ipcMain.handle('get-yields-by-location', async (event, { location, sortBy = 'qua
     db.all(
       `SELECT MIN(id) as id, material, quality, SUM(yield_cscu) as yield_cscu, 'Aggregated' as miner_name 
        FROM yields 
-       WHERE location = ? 
+       WHERE location = ? AND is_deleted = 0 
        GROUP BY material, quality 
        ORDER BY material, ${actualSortBy} ${actualSortOrder}`,
       [location],
@@ -135,70 +351,81 @@ ipcMain.handle('get-yields-by-location', async (event, { location, sortBy = 'qua
 });
 
 ipcMain.handle('save-yield', async (event, yieldData) => {
-  return new Promise((resolve, reject) => {
+  const result = await new Promise((resolve, reject) => {
     const { material, quality, yield_cscu, miner_name, location } = yieldData;
     if (!miner_name || miner_name === 'Unknown') {
       return reject(new Error('Miner name is required.'));
     }
     const actualMinerName = miner_name;
     const actualLocation = location || 'Unknown';
+    const uuid = crypto.randomUUID();
+    const now = new Date().toISOString();
     
     db.serialize(() => {
       // Ensure miner exists in miners table
-      db.run('INSERT OR IGNORE INTO miners (name) VALUES (?)', [actualMinerName]);
+      db.get('SELECT uuid FROM miners WHERE name = ?', [actualMinerName], (err, row) => {
+        if (!row) {
+          db.run('INSERT INTO miners (name, uuid, updated_at) VALUES (?, ?, ?)', [actualMinerName, crypto.randomUUID(), now]);
+        } else {
+          db.run('UPDATE miners SET updated_at = ? WHERE name = ?', [now, actualMinerName]);
+        }
+      });
       
       // Update miner stats (cumulative, never subtracted)
       db.run(`
         UPDATE miners SET 
           total_yield = total_yield + ?, 
           total_quality_sum = total_quality_sum + ?, 
-          record_count = record_count + 1 
+          record_count = record_count + ?,
+          updated_at = ?
         WHERE name = ?
-      `, [yield_cscu, quality, actualMinerName]);
+      `, [yield_cscu, quality, 1, now, actualMinerName]);
 
-      // Check if an entry with the same material, quality, miner_name and location exists
-      db.get('SELECT id, yield_cscu FROM yields WHERE material = ? AND quality = ? AND miner_name = ? AND location = ?', [material, quality, actualMinerName, actualLocation], (err, row) => {
+      // Check if an entry with the same material, quality, miner_name and location exists (excluding deleted ones)
+      db.get('SELECT id, yield_cscu, uuid FROM yields WHERE material = ? AND quality = ? AND miner_name = ? AND location = ? AND is_deleted = 0', [material, quality, actualMinerName, actualLocation], (err, row) => {
         if (err) return reject(err);
         if (row) {
           // Update existing entry
           const newYield = row.yield_cscu + yield_cscu;
-          db.run('UPDATE yields SET yield_cscu = ? WHERE id = ?', [newYield, row.id], (err) => {
+          db.run('UPDATE yields SET yield_cscu = ?, updated_at = ? WHERE id = ?', [newYield, now, row.id], (err) => {
             if (err) reject(err);
-            else resolve({ id: row.id, updated: true });
+            else resolve({ id: row.id, uuid: row.uuid, updated: true });
           });
         } else {
           // Insert new entry
           db.run(
-            'INSERT INTO yields (material, quality, yield_cscu, miner_name, location) VALUES (?, ?, ?, ?, ?)',
-            [material, quality, yield_cscu, actualMinerName, actualLocation],
+            'INSERT INTO yields (uuid, material, quality, yield_cscu, miner_name, location, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [uuid, material, quality, yield_cscu, actualMinerName, actualLocation, now],
             function (err) {
               if (err) reject(err);
-              else resolve({ id: this.lastID, updated: false });
+              else resolve({ id: this.lastID, uuid: uuid, updated: false });
             }
           );
         }
       });
     });
   });
+  broadcastSync();
+  return result;
 });
 
 ipcMain.handle('update-yield', async (event, yieldData) => {
-  return new Promise((resolve, reject) => {
+  const result = await new Promise((resolve, reject) => {
     const { id, material, quality, yield_cscu, miner_name, location } = yieldData;
-    
     const actualLocation = location || 'Unknown';
+    const now = new Date().toISOString();
 
     if (miner_name === 'Aggregated') {
-      // Aggregated update: we change the total yield for this material/quality/location
-      // Actually we don't have location passed from table yet? We'll see.
-      db.get('SELECT material, quality, location FROM yields WHERE id = ?', [id], (err, row) => {
+      db.get('SELECT material, quality, location, uuid FROM yields WHERE id = ?', [id], (err, row) => {
         if (err) return reject(err);
         if (row) {
           db.serialize(() => {
-            db.run('DELETE FROM yields WHERE material = ? AND quality = ? AND location = ?', [row.material, row.quality, row.location]);
+            // Soft delete old ones
+            db.run('UPDATE yields SET is_deleted = 1, updated_at = ? WHERE material = ? AND quality = ? AND location = ? AND is_deleted = 0', [now, row.material, row.quality, row.location]);
+            // Insert new aggregated record
             db.run(
-              'INSERT INTO yields (material, quality, yield_cscu, miner_name, location) VALUES (?, ?, ?, ?, ?)',
-              [material, quality, yield_cscu, 'Aggregated', actualLocation],
+              'INSERT INTO yields (uuid, material, quality, yield_cscu, miner_name, location, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+              [crypto.randomUUID(), material, quality, yield_cscu, 'Aggregated', actualLocation, now],
               (err) => {
                 if (err) reject(err);
                 else resolve(true);
@@ -212,21 +439,16 @@ ipcMain.handle('update-yield', async (event, yieldData) => {
       return;
     }
 
-    if (!miner_name || miner_name === 'Unknown') {
-      if (miner_name !== 'Aggregated') {
-        return reject(new Error('Miner name is required for updates.'));
-      }
-    }
     const actualMinerName = miner_name;
-    // Check if updating to a material/quality/miner/location that already exists (for merging)
-    db.get('SELECT id, yield_cscu FROM yields WHERE material = ? AND quality = ? AND miner_name = ? AND location = ? AND id != ?', [material, quality, actualMinerName, actualLocation, id], (err, row) => {
+    // Check if updating to a material/quality/miner/location that already exists (for merging, excluding deleted)
+    db.get('SELECT id, yield_cscu, uuid FROM yields WHERE material = ? AND quality = ? AND miner_name = ? AND location = ? AND id != ? AND is_deleted = 0', [material, quality, actualMinerName, actualLocation, id], (err, row) => {
       if (err) return reject(err);
       if (row) {
-        // Merge into the existing record and delete this one
+        // Merge into the existing record and soft delete this one
         const newTotalYield = row.yield_cscu + yield_cscu;
         db.serialize(() => {
-          db.run('UPDATE yields SET yield_cscu = ? WHERE id = ?', [newTotalYield, row.id]);
-          db.run('DELETE FROM yields WHERE id = ?', [id], (err) => {
+          db.run('UPDATE yields SET yield_cscu = ?, updated_at = ? WHERE id = ?', [newTotalYield, now, row.id]);
+          db.run('UPDATE yields SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, id], (err) => {
             if (err) reject(err);
             else resolve(true);
           });
@@ -234,8 +456,8 @@ ipcMain.handle('update-yield', async (event, yieldData) => {
       } else {
         // Normal update
         db.run(
-          'UPDATE yields SET material = ?, quality = ?, yield_cscu = ?, miner_name = ?, location = ? WHERE id = ?',
-          [material, quality, yield_cscu, actualMinerName, actualLocation, id],
+          'UPDATE yields SET material = ?, quality = ?, yield_cscu = ?, miner_name = ?, location = ?, updated_at = ? WHERE id = ?',
+          [material, quality, yield_cscu, actualMinerName, actualLocation, now, id],
           function (err) {
             if (err) reject(err);
             else resolve(true);
@@ -244,12 +466,26 @@ ipcMain.handle('update-yield', async (event, yieldData) => {
       }
     });
   });
+  broadcastSync();
+  return result;
+});
+
+ipcMain.handle('delete-yield', async (event, id) => {
+  const result = await new Promise((resolve, reject) => {
+    const now = new Date().toISOString();
+    db.run('UPDATE yields SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, id], (err) => {
+      if (err) reject(err);
+      else resolve(true);
+    });
+  });
+  broadcastSync();
+  return result;
 });
 
 // Miner Management Operations
 ipcMain.handle('get-miners', async () => {
   return new Promise((resolve, reject) => {
-    db.all('SELECT * FROM miners ORDER BY name ASC', (err, rows) => {
+    db.all('SELECT * FROM miners WHERE is_deleted = 0 ORDER BY name ASC', (err, rows) => {
       if (err) reject(err);
       else resolve(rows);
     });
@@ -257,8 +493,10 @@ ipcMain.handle('get-miners', async () => {
 });
 
 ipcMain.handle('add-miner', async (event, name) => {
-  return new Promise((resolve, reject) => {
-    db.run('INSERT INTO miners (name) VALUES (?)', [name], function (err) {
+  const result = await new Promise((resolve, reject) => {
+    const uuid = crypto.randomUUID();
+    const now = new Date().toISOString();
+    db.run('INSERT INTO miners (name, uuid, updated_at) VALUES (?, ?, ?)', [name, uuid, now], function (err) {
       if (err) {
         if (err.message.includes('UNIQUE constraint failed')) {
           reject(new Error('Miner already exists.'));
@@ -266,15 +504,18 @@ ipcMain.handle('add-miner', async (event, name) => {
           reject(err);
         }
       } else {
-        resolve({ id: this.lastID, name });
+        resolve({ id: this.lastID, uuid, name });
       }
     });
   });
+  broadcastSync();
+  return result;
 });
 
 ipcMain.handle('update-miner', async (event, { id, name }) => {
-  return new Promise((resolve, reject) => {
-    db.run('UPDATE miners SET name = ? WHERE id = ?', [name, id], function (err) {
+  const result = await new Promise((resolve, reject) => {
+    const now = new Date().toISOString();
+    db.run('UPDATE miners SET name = ?, updated_at = ? WHERE id = ?', [name, now, id], function (err) {
       if (err) {
         if (err.message.includes('UNIQUE constraint failed')) {
           reject(new Error('Miner name already exists.'));
@@ -286,15 +527,20 @@ ipcMain.handle('update-miner', async (event, { id, name }) => {
       }
     });
   });
+  broadcastSync();
+  return result;
 });
 
 ipcMain.handle('delete-miner', async (event, id) => {
-  return new Promise((resolve, reject) => {
-    db.run('DELETE FROM miners WHERE id = ?', [id], (err) => {
+  const result = await new Promise((resolve, reject) => {
+    const now = new Date().toISOString();
+    db.run('UPDATE miners SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, id], (err) => {
       if (err) reject(err);
       else resolve(true);
     });
   });
+  broadcastSync();
+  return result;
 });
 
 ipcMain.handle('import-csv', async (event) => {
@@ -326,9 +572,10 @@ ipcMain.handle('import-csv', async (event) => {
 
   const minerName = 'None';
   
-  return new Promise((resolve, reject) => {
+  const result = await new Promise((resolve, reject) => {
+    const now = new Date().toISOString();
     db.serialize(() => {
-      const stmt = db.prepare('INSERT OR IGNORE INTO yields (location, material, quality, yield_cscu, miner_name) VALUES (?, ?, ?, ?, ?)');
+      const stmt = db.prepare('INSERT OR IGNORE INTO yields (uuid, location, material, quality, yield_cscu, miner_name, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
       let errorOccurred = false;
 
       for (let i = 1; i < lines.length; i++) {
@@ -354,7 +601,8 @@ ipcMain.handle('import-csv', async (event) => {
         const quantity = parseFloat(parts[colIndex.quantity]);
 
         if (location && ore && !isNaN(quality) && !isNaN(quantity)) {
-          stmt.run(location, ore, quality, quantity, minerName, (err) => {
+          const uuid = crypto.randomUUID();
+          stmt.run(uuid, location, ore, quality, quantity, minerName, now, (err) => {
             if (err) {
               console.error('Import row error:', err);
               errorOccurred = true;
@@ -369,6 +617,8 @@ ipcMain.handle('import-csv', async (event) => {
       });
     });
   });
+  broadcastSync();
+  return result;
 });
 
 ipcMain.handle('get-miner-stats', async (event, { sortBy = 'name', sortOrder = 'ASC' } = {}) => {
@@ -413,21 +663,6 @@ ipcMain.handle('get-yields-by-miner', async (event, minerName) => {
   });
 });
 
-ipcMain.handle('delete-yield', async (event, id) => {
-  return new Promise((resolve, reject) => {
-    db.get('SELECT material, quality, location FROM yields WHERE id = ?', [id], (err, row) => {
-      if (err) return reject(err);
-      if (row) {
-        db.run('DELETE FROM yields WHERE material = ? AND quality = ? AND location = ?', [row.material, row.quality, row.location], (err) => {
-          if (err) reject(err);
-          else resolve(true);
-        });
-      } else {
-        resolve(false);
-      }
-    });
-  });
-});
 
 ipcMain.handle('clear-database', async () => {
   return new Promise((resolve, reject) => {
