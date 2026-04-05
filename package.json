@@ -1,7 +1,7 @@
 {
-  "name": "sc-ore-tracker",
-  "version": "2.0.0",
-  "description": "Star Citizen Ore Tracker",
+  "name": "sc-tracker",
+  "version": "3.0.0",
+  "description": "Star Citizen Tracker",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -9,8 +9,8 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "build": {
-    "appId": "com.sc.ore.tracker",
-    "productName": "SC Ore Tracker",
+    "appId": "com.sc.tracker",
+    "productName": "SC Tracker",
     "win": {
       "target": "portable",
       "icon": "icon.ico",

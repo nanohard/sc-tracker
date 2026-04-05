@@ -62,7 +62,8 @@ function startSwarm() {
   db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
     if (row) {
       const peerUuids = JSON.parse(row.value);
-      [localSyncUuid, ...peerUuids].forEach(uuid => {
+      const uuids = peerUuids.map(p => typeof p === 'string' ? p : p.uuid);
+      [localSyncUuid, ...uuids].forEach(uuid => {
         const topic = crypto.createHash('sha256').update(uuid).digest();
         swarm.join(topic, { lookup: true, announce: true });
       });
@@ -149,11 +150,23 @@ async function getDatabaseUpdates(sinceTimestamp) {
     db.all("SELECT * FROM miners WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
   });
 
-  return { yields, miners };
+  const orders = await new Promise(resolve => {
+    db.all("SELECT * FROM orders WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
+  });
+
+  const order_contributions = await new Promise(resolve => {
+    db.all("SELECT * FROM order_contributions WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
+  });
+
+  const inventory = await new Promise(resolve => {
+    db.all("SELECT * FROM inventory WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
+  });
+
+  return { yields, miners, orders, order_contributions, inventory };
 }
 
 async function applyDatabaseUpdates(updates) {
-  const { yields, miners } = updates;
+  const { yields, miners, orders, order_contributions, inventory } = updates;
 
   for (const miner of miners) {
     await new Promise(resolve => {
@@ -184,6 +197,57 @@ async function applyDatabaseUpdates(updates) {
       });
     });
   }
+
+  if (orders) {
+    for (const order of orders) {
+      await new Promise(resolve => {
+        db.get("SELECT updated_at, is_deleted FROM orders WHERE uuid = ?", [order.uuid], (err, row) => {
+          if (!row || new Date(order.updated_at) > new Date(row.updated_at)) {
+            db.run(`
+              INSERT OR REPLACE INTO orders (uuid, material, quantity, quantity_mined, min_quality, status, created_at, updated_at, is_deleted)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `, [order.uuid, order.material, order.quantity, order.quantity_mined, order.min_quality, order.status, order.created_at, order.updated_at, order.is_deleted], () => resolve());
+          } else {
+            resolve();
+          }
+        });
+      });
+    }
+  }
+
+  if (order_contributions) {
+    for (const contrib of order_contributions) {
+      await new Promise(resolve => {
+        db.get("SELECT updated_at, is_deleted FROM order_contributions WHERE uuid = ?", [contrib.uuid], (err, row) => {
+          if (!row || new Date(contrib.updated_at) > new Date(row.updated_at)) {
+            db.run(`
+              INSERT OR REPLACE INTO order_contributions (uuid, order_uuid, miner_name, material, quantity, quality, timestamp, updated_at, is_deleted)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `, [contrib.uuid, contrib.order_uuid, contrib.miner_name, contrib.material, contrib.quantity, contrib.quality, contrib.timestamp, contrib.updated_at, contrib.is_deleted], () => resolve());
+          } else {
+            resolve();
+          }
+        });
+      });
+    }
+  }
+
+  if (inventory) {
+    for (const item of inventory) {
+      await new Promise(resolve => {
+        db.get("SELECT updated_at, is_deleted FROM inventory WHERE uuid = ?", [item.uuid], (err, row) => {
+          if (!row || new Date(item.updated_at) > new Date(row.updated_at)) {
+            db.run(`
+              INSERT OR REPLACE INTO inventory (uuid, material, quality, quantity, location, updated_at, is_deleted)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+            `, [item.uuid, item.material, item.quality, item.quantity, item.location, item.updated_at, item.is_deleted], () => resolve());
+          } else {
+            resolve();
+          }
+        });
+      });
+    }
+  }
 }
 
 ipcMain.handle('get-sync-settings', async () => {
@@ -207,12 +271,17 @@ ipcMain.handle('get-sync-settings', async () => {
   });
 });
 
-ipcMain.handle('add-peer-uuid', async (event, peerUuid) => {
+ipcMain.handle('add-peer-uuid', async (event, peerUuid, nickname) => {
   return new Promise(resolve => {
     db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
       const peerUuids = JSON.parse(row.value);
-      if (!peerUuids.includes(peerUuid)) {
-        peerUuids.push(peerUuid);
+      const existingPeer = peerUuids.find(p => {
+        if (typeof p === 'string') return p === peerUuid;
+        return p.uuid === peerUuid;
+      });
+
+      if (!existingPeer) {
+        peerUuids.push({ uuid: peerUuid, nickname: nickname });
         db.run("UPDATE sync_settings SET value = ? WHERE key = 'peer_uuids'", [JSON.stringify(peerUuids)], () => {
           const topic = crypto.createHash('sha256').update(peerUuid).digest();
           if (swarm) swarm.join(topic, { lookup: true, announce: true });
@@ -229,7 +298,10 @@ ipcMain.handle('remove-peer-uuid', async (event, peerUuid) => {
   return new Promise(resolve => {
     db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
       let peerUuids = JSON.parse(row.value);
-      peerUuids = peerUuids.filter(id => id !== peerUuid);
+      peerUuids = peerUuids.filter(p => {
+        if (typeof p === 'string') return p !== peerUuid;
+        return p.uuid !== peerUuid;
+      });
       db.run("UPDATE sync_settings SET value = ? WHERE key = 'peer_uuids'", [JSON.stringify(peerUuids)], () => {
         const topic = crypto.createHash('sha256').update(peerUuid).digest();
         if (swarm) swarm.leave(topic);
@@ -350,28 +422,99 @@ ipcMain.handle('get-yields-by-location', async (event, { location, sortBy = 'qua
   });
 });
 
-ipcMain.handle('save-yield', async (event, yieldData) => {
-  const result = await new Promise((resolve, reject) => {
-    const { material, quality, yield_cscu, miner_name, location } = yieldData;
-    if (!miner_name || miner_name === 'Unknown') {
-      return reject(new Error('Miner name is required.'));
-    }
-    const actualMinerName = miner_name;
-    const actualLocation = location || 'Unknown';
-    const uuid = crypto.randomUUID();
-    const now = new Date().toISOString();
-    
-    db.serialize(() => {
-      // Ensure miner exists in miners table
-      db.get('SELECT uuid FROM miners WHERE name = ?', [actualMinerName], (err, row) => {
-        if (!row) {
-          db.run('INSERT INTO miners (name, uuid, updated_at) VALUES (?, ?, ?)', [actualMinerName, crypto.randomUUID(), now]);
-        } else {
-          db.run('UPDATE miners SET updated_at = ? WHERE name = ?', [now, actualMinerName]);
+ipcMain.handle('get-ore-locations-by-miner', async () => {
+  return new Promise((resolve, reject) => {
+    db.all(
+      `SELECT id, miner_name, material, location, quality, yield_cscu, timestamp 
+       FROM yields 
+       WHERE is_deleted = 0 
+       ORDER BY miner_name ASC, timestamp DESC`,
+      (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      }
+    );
+  });
+});
+
+async function processOrdersForYield(material, quality, yield_cscu, miner_name) {
+  const now = new Date().toISOString();
+  return new Promise(resolve => {
+    // Find matching pending orders
+    db.all(
+      "SELECT * FROM orders WHERE material = ? AND min_quality <= ? AND status = 'Pending' AND is_deleted = 0 ORDER BY min_quality DESC, created_at ASC",
+      [material, quality],
+      (err, orders) => {
+        if (err || !orders || orders.length === 0) {
+          resolve();
+          return;
         }
+
+        let remainingYield = yield_cscu;
+        const updatePromises = [];
+
+        for (const order of orders) {
+          if (remainingYield <= 0) break;
+
+          const needed = order.quantity - order.quantity_mined;
+          if (needed <= 0) continue;
+
+          const amountToAdd = Math.min(needed, remainingYield);
+          const newQuantityMined = order.quantity_mined + amountToAdd;
+          remainingYield -= amountToAdd;
+
+          const newStatus = newQuantityMined >= order.quantity ? 'Completed' : 'Pending';
+
+          updatePromises.push(new Promise(res => {
+            db.serialize(() => {
+              db.run(
+                "UPDATE orders SET quantity_mined = ?, status = ?, updated_at = ? WHERE uuid = ?",
+                [newQuantityMined, newStatus, now, order.uuid]
+              );
+              
+              const contribUuid = crypto.randomUUID();
+              db.run(
+                "INSERT INTO order_contributions (uuid, order_uuid, miner_name, material, quantity, quality, timestamp, updated_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [contribUuid, order.uuid, miner_name, material, amountToAdd, quality, now, now, 0],
+                () => res()
+              );
+            });
+          }));
+        }
+
+        Promise.all(updatePromises).then(() => {
+          if (updatePromises.length > 0) broadcastSync();
+          resolve();
+        });
+      }
+    );
+  });
+}
+
+ipcMain.handle('save-yield', async (event, yieldData) => {
+  console.log('Received save-yield request:', yieldData);
+  const { material, quality, yield_cscu, miner_name, location } = yieldData;
+
+  if (!miner_name || miner_name === 'Unknown') {
+    console.error('save-yield error: Miner name is required.');
+    throw new Error('Miner name is required.');
+  }
+
+  const actualMinerName = miner_name;
+  const actualLocation = location || 'Unknown';
+  const now = new Date().toISOString();
+
+  // Process orders BEFORE saving the yield to database to use the current yield_cscu correctly
+  await processOrdersForYield(material, quality, yield_cscu, actualMinerName);
+
+  return new Promise((resolve, reject) => {
+    db.serialize(() => {
+      // 1. Ensure miner exists
+      db.run('INSERT OR IGNORE INTO miners (name, uuid, updated_at) VALUES (?, ?, ?)', [actualMinerName, crypto.randomUUID(), now], (err) => {
+        if (err) console.error('Error inserting miner:', err);
       });
       
-      // Update miner stats (cumulative, never subtracted)
+      // 2. Update miner stats (cumulative)
       db.run(`
         UPDATE miners SET 
           total_yield = total_yield + ?, 
@@ -379,41 +522,46 @@ ipcMain.handle('save-yield', async (event, yieldData) => {
           record_count = record_count + ?,
           updated_at = ?
         WHERE name = ?
-      `, [yield_cscu, quality, 1, now, actualMinerName]);
+      `, [yield_cscu, quality, 1, now, actualMinerName], (err) => {
+        if (err) console.error('Error updating miner stats:', err);
+      });
 
-      // Check if an entry with the same material, quality, miner_name and location exists (excluding deleted ones)
-      db.get('SELECT id, yield_cscu, uuid FROM yields WHERE material = ? AND quality = ? AND miner_name = ? AND location = ? AND is_deleted = 0', [material, quality, actualMinerName, actualLocation], (err, row) => {
-        if (err) return reject(err);
-        if (row) {
-          // Update existing entry
-          const newYield = row.yield_cscu + yield_cscu;
-          db.run('UPDATE yields SET yield_cscu = ?, updated_at = ? WHERE id = ?', [newYield, now, row.id], (err) => {
-            if (err) reject(err);
-            else resolve({ id: row.id, uuid: row.uuid, updated: true });
-          });
+      // 3. Upsert yield record using ON CONFLICT (atomic merge)
+      // Note: material, quality, miner_name, location is the unique index (where is_deleted=0)
+      const uuid = crypto.randomUUID();
+      db.run(`
+        INSERT INTO yields (uuid, material, quality, yield_cscu, miner_name, location, timestamp, updated_at, is_deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(material, quality, miner_name, location) WHERE is_deleted = 0
+        DO UPDATE SET 
+          yield_cscu = yields.yield_cscu + excluded.yield_cscu, 
+          updated_at = excluded.updated_at
+      `, [uuid, material, quality, yield_cscu, actualMinerName, actualLocation, now, now, 0], function(err) {
+        if (err) {
+          console.error('Error saving yield record:', err);
+          reject(err);
         } else {
-          // Insert new entry
-          db.run(
-            'INSERT INTO yields (uuid, material, quality, yield_cscu, miner_name, location, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [uuid, material, quality, yield_cscu, actualMinerName, actualLocation, now],
-            function (err) {
-              if (err) reject(err);
-              else resolve({ id: this.lastID, uuid: uuid, updated: false });
-            }
-          );
+          broadcastSync();
+          // Find out if it was an insert or update for return value
+          // lastID is only set on INSERT.
+          resolve({ id: this.lastID, updated: this.changes === 0 });
         }
       });
     });
   });
-  broadcastSync();
-  return result;
 });
 
 ipcMain.handle('update-yield', async (event, yieldData) => {
-  const result = await new Promise((resolve, reject) => {
+  const result = await new Promise(async (resolve, reject) => {
     const { id, material, quality, yield_cscu, miner_name, location } = yieldData;
     const actualLocation = location || 'Unknown';
     const now = new Date().toISOString();
+
+    // Since updating a yield can change quality or amount, it's complex to "undo" previous order impacts.
+    // However, the requirement says "Any time a miner submits an ore... the Quantity Mined should be increased".
+    // If they EDIT a yield, it's like a new submission of that amount.
+    // To be safe and simple, we'll treat the updated amount as new progress.
+    await processOrdersForYield(material, quality, yield_cscu, miner_name);
 
     if (miner_name === 'Aggregated') {
       db.get('SELECT material, quality, location, uuid FROM yields WHERE id = ?', [id], (err, row) => {
@@ -424,8 +572,8 @@ ipcMain.handle('update-yield', async (event, yieldData) => {
             db.run('UPDATE yields SET is_deleted = 1, updated_at = ? WHERE material = ? AND quality = ? AND location = ? AND is_deleted = 0', [now, row.material, row.quality, row.location]);
             // Insert new aggregated record
             db.run(
-              'INSERT INTO yields (uuid, material, quality, yield_cscu, miner_name, location, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-              [crypto.randomUUID(), material, quality, yield_cscu, 'Aggregated', actualLocation, now],
+              'INSERT INTO yields (uuid, material, quality, yield_cscu, miner_name, location, timestamp, updated_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+              [crypto.randomUUID(), material, quality, yield_cscu, 'Aggregated', actualLocation, now, now, 0],
               (err) => {
                 if (err) reject(err);
                 else resolve(true);
@@ -575,7 +723,7 @@ ipcMain.handle('import-csv', async (event) => {
   const result = await new Promise((resolve, reject) => {
     const now = new Date().toISOString();
     db.serialize(() => {
-      const stmt = db.prepare('INSERT OR IGNORE INTO yields (uuid, location, material, quality, yield_cscu, miner_name, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      const stmt = db.prepare('INSERT OR IGNORE INTO yields (uuid, location, material, quality, yield_cscu, miner_name, timestamp, updated_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
       let errorOccurred = false;
 
       for (let i = 1; i < lines.length; i++) {
@@ -602,7 +750,7 @@ ipcMain.handle('import-csv', async (event) => {
 
         if (location && ore && !isNaN(quality) && !isNaN(quantity)) {
           const uuid = crypto.randomUUID();
-          stmt.run(uuid, location, ore, quality, quantity, minerName, now, (err) => {
+          stmt.run(uuid, location, ore, quality, quantity, minerName, now, now, 0, (err) => {
             if (err) {
               console.error('Import row error:', err);
               errorOccurred = true;
@@ -653,7 +801,7 @@ ipcMain.handle('get-miner-stats', async (event, { sortBy = 'name', sortOrder = '
 ipcMain.handle('get-yields-by-miner', async (event, minerName) => {
   return new Promise((resolve, reject) => {
     db.all(
-      'SELECT id, material, quality, yield_cscu, location, timestamp FROM yields WHERE miner_name = ? ORDER BY timestamp ASC',
+      'SELECT id, material, quality, yield_cscu, location, timestamp FROM yields WHERE miner_name = ? AND is_deleted = 0 ORDER BY timestamp ASC',
       [minerName],
       (err, rows) => {
         if (err) reject(err);
@@ -695,9 +843,76 @@ ipcMain.handle('show-alert-dialog', async (event, message) => {
 
 ipcMain.handle('get-all-yields', async () => {
   return new Promise((resolve, reject) => {
-    db.all('SELECT location, material, quality, SUM(yield_cscu) as yield_cscu FROM yields GROUP BY location, material, quality ORDER BY location ASC, material ASC, quality DESC', (err, rows) => {
+    db.all('SELECT location, material, quality, SUM(yield_cscu) as yield_cscu FROM yields WHERE is_deleted = 0 GROUP BY location, material, quality ORDER BY location ASC, material ASC, quality DESC', (err, rows) => {
       if (err) reject(err);
       else resolve(rows);
+    });
+  });
+});
+
+ipcMain.handle('get-inventory', async () => {
+  return new Promise((resolve, reject) => {
+    db.all('SELECT * FROM inventory WHERE is_deleted = 0 ORDER BY material ASC, quality DESC', (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+});
+
+ipcMain.handle('transfer-to-inventory', async (event, { yieldId, location }) => {
+  const now = new Date().toISOString();
+  return new Promise((resolve, reject) => {
+    db.get('SELECT * FROM yields WHERE id = ?', [yieldId], (err, row) => {
+      if (err || !row) {
+        reject(err || new Error('Yield not found'));
+        return;
+      }
+
+      db.serialize(() => {
+        db.run('UPDATE yields SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, yieldId]);
+        const uuid = crypto.randomUUID();
+        db.run(
+          'INSERT INTO inventory (uuid, material, quality, quantity, location, updated_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [uuid, row.material, row.quality, row.yield_cscu, location, now, 0],
+          (err) => {
+            if (err) reject(err);
+            else {
+              broadcastSync();
+              resolve(true);
+            }
+          }
+        );
+      });
+    });
+  });
+});
+
+ipcMain.handle('update-inventory', async (event, { id, quantity, location }) => {
+  const now = new Date().toISOString();
+  return new Promise((resolve, reject) => {
+    db.run(
+      'UPDATE inventory SET quantity = ?, location = ?, updated_at = ? WHERE id = ?',
+      [quantity, location, now, id],
+      (err) => {
+        if (err) reject(err);
+        else {
+          broadcastSync();
+          resolve(true);
+        }
+      }
+    );
+  });
+});
+
+ipcMain.handle('delete-inventory', async (event, id) => {
+  const now = new Date().toISOString();
+  return new Promise((resolve, reject) => {
+    db.run('UPDATE inventory SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, id], (err) => {
+      if (err) reject(err);
+      else {
+        broadcastSync();
+        resolve(true);
+      }
     });
   });
 });
@@ -714,4 +929,67 @@ ipcMain.handle('save-csv', async (event, csvContent) => {
     return true;
   }
   return false;
+});
+
+ipcMain.handle('add-order', async (event, order) => {
+  const uuid = crypto.randomUUID();
+  const now = new Date().toISOString();
+  return new Promise(resolve => {
+    db.run(`
+      INSERT INTO orders (uuid, material, quantity, quantity_mined, min_quality, status, created_at, updated_at, is_deleted)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [uuid, order.material, order.quantity, 0, order.min_quality, 'Pending', now, now, 0], (err) => {
+      if (!err) broadcastSync();
+      resolve(!err);
+    });
+  });
+});
+
+ipcMain.handle('get-orders', async () => {
+  return new Promise(resolve => {
+    db.all("SELECT * FROM orders WHERE is_deleted = 0 ORDER BY created_at DESC", (err, rows) => {
+      resolve(rows || []);
+    });
+  });
+});
+
+ipcMain.handle('delete-order', async (event, uuid) => {
+  const now = new Date().toISOString();
+  return new Promise(resolve => {
+    db.run("UPDATE orders SET is_deleted = 1, updated_at = ? WHERE uuid = ?", [now, uuid], (err) => {
+      if (!err) broadcastSync();
+      resolve(!err);
+    });
+  });
+});
+
+ipcMain.handle('update-order-status', async (event, { uuid, status }) => {
+    const now = new Date().toISOString();
+    return new Promise(resolve => {
+        db.run("UPDATE orders SET status = ?, updated_at = ? WHERE uuid = ?", [status, now, uuid], (err) => {
+            if (!err) broadcastSync();
+            resolve(!err);
+        });
+    });
+});
+
+ipcMain.handle('get-order-details', async (event, orderUuid) => {
+  return new Promise((resolve, reject) => {
+    db.serialize(() => {
+      db.get("SELECT * FROM orders WHERE uuid = ?", [orderUuid], (err, order) => {
+        if (err || !order) {
+          resolve(null);
+          return;
+        }
+        db.all(
+          "SELECT * FROM order_contributions WHERE order_uuid = ? AND is_deleted = 0 ORDER BY timestamp DESC",
+          [orderUuid],
+          (err, contributions) => {
+            if (err) resolve(null);
+            else resolve({ order, contributions });
+          }
+        );
+      });
+    });
+  });
 });

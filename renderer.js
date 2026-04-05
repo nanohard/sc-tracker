@@ -1,50 +1,87 @@
 const { ipcRenderer, webUtils } = require('electron');
 
+console.log('Renderer process starting...');
+
 const fileInput = document.getElementById('file-input');
 const imagePreview = document.getElementById('image-preview');
 const statusDiv = document.getElementById('status');
 const rawTextDiv = document.getElementById('raw-text');
 
-const viewOreList = document.getElementById('view-ore-list');
+const viewDashboard = document.getElementById('view-dashboard');
+const viewMiningList = document.getElementById('view-mining-list');
 const viewOreDetails = document.getElementById('view-ore-details');
 const viewMinerList = document.getElementById('view-miner-list');
 const viewStatistics = document.getElementById('view-statistics');
 const viewMinerDetails = document.getElementById('view-miner-details');
+const viewSync = document.getElementById('view-sync');
+const viewOrders = document.getElementById('view-orders');
+const viewCompletedOrders = document.getElementById('view-completed-orders');
+const viewOreLocation = document.getElementById('view-ore-location');
+const viewInventory = document.getElementById('view-inventory');
 const oreContainer = document.getElementById('ore-container');
 const yieldBody = document.getElementById('yield-body');
 const minerBody = document.getElementById('miner-body');
 const statsBody = document.getElementById('stats-body');
+const oreLocationBody = document.getElementById('ore-location-body');
+const inventoryBody = document.getElementById('inventory-body');
+const ordersBody = document.getElementById('orders-body');
+const completedOrdersBody = document.getElementById('completed-orders-body');
 const minerDetailsBody = document.getElementById('miner-details-body');
 const currentOreNameHeader = document.getElementById('current-ore-name');
 const currentMinerNameHeader = document.getElementById('current-miner-name');
 const backToListBtn = document.getElementById('back-to-list');
 const backToStatsBtn = document.getElementById('back-to-stats');
-const appTitle = document.getElementById('app-title');
-const clearDbBtn = document.getElementById('clear-db-btn');
-const exportCsvBtn = document.getElementById('export-csv-btn');
-const importCsvBtn = document.getElementById('import-csv-btn');
-
-const navOresBtn = document.getElementById('nav-ores');
-const navMinersBtn = document.getElementById('nav-miners');
+const backToMiningFromMiners = document.getElementById('back-to-mining-from-miners');
+const backToMiningFromStats = document.getElementById('back-to-mining-from-stats');
+const backToMiningFromOreLoc = document.getElementById('back-to-mining-from-ore-loc');
+const backToDashFromSync = document.getElementById('back-to-dash-from-sync');
+const backToMiningFromOrders = document.getElementById('back-to-mining-from-orders');
+const backToDashFromInventory = document.getElementById('back-to-dash-from-inventory');
+const backToOrdersFromCompleted = document.getElementById('back-to-orders-from-completed');
+const navDashboardBtn = document.getElementById('nav-dashboard');
 const navStatsBtn = document.getElementById('nav-stats');
-const navSyncBtn = document.getElementById('nav-sync');
-const viewSync = document.getElementById('sync-view');
+const navMinersBtn = document.getElementById('nav-miners');
+const navOrdersBtn = document.getElementById('nav-orders');
+const navOreLocationBtn = document.getElementById('nav-ore-location');
+const navCompletedOrdersBtn = document.getElementById('nav-completed-orders');
+const viewOrderDetails = document.getElementById('view-order-details');
+const orderDetailsTitle = document.getElementById('order-details-title');
+const orderSummaryDiv = document.getElementById('order-summary');
+const orderContributionsBody = document.getElementById('order-contributions-body');
+const backToOrdersFromDetailsBtn = document.getElementById('back-to-orders-from-details');
+const appTitle = document.getElementById('app-title');
+
+const dashMiningBtn = document.getElementById('dash-ores');
+const dashInventoryBtn = document.getElementById('dash-inventory');
+const dashSyncBtn = document.getElementById('dash-sync-btn');
+
 const localSyncUuidCode = document.getElementById('local-sync-uuid');
 const copySyncUuidBtn = document.getElementById('copy-sync-uuid');
 const peerListDiv = document.getElementById('peer-list');
+const peerNicknameInput = document.getElementById('peer-nickname-input');
 const peerUuidInput = document.getElementById('peer-uuid-input');
 const addPeerBtn = document.getElementById('add-peer-button');
 const syncStatusDiv = document.getElementById('sync-status');
 const globalMinerSelect = document.getElementById('global-miner-select');
 const globalLocationSelect = document.getElementById('global-location-select');
-const editMinerSelect = document.getElementById('edit-miner');
 const newMinerNameInput = document.getElementById('new-miner-name');
 const addMinerBtn = document.getElementById('add-miner-btn');
 const minerStatus = document.getElementById('miner-status');
+const orderOreInput = document.getElementById('order-ore');
+const orderQuantityInput = document.getElementById('order-quantity');
+const orderQualitySelect = document.getElementById('order-quality');
+const submitOrderBtn = document.getElementById('submit-order-btn');
+const orderSubmitStatus = document.getElementById('order-submit-status');
 
 // Edit Modal Elements
 const editModal = document.getElementById('edit-modal');
+const editModalTitle = document.getElementById('edit-modal-title');
+const editMatRow = document.getElementById('edit-mat-row');
+const editQualityRow = document.getElementById('edit-quality-row');
+const editYieldRow = document.getElementById('edit-yield-row');
 const editMinerRow = document.getElementById('edit-miner-row');
+const editLocationRow = document.getElementById('edit-location-row');
+const editYieldLabel = document.getElementById('edit-yield-label');
 const editId = document.getElementById('edit-id');
 const editMat = document.getElementById('edit-mat');
 const editQuality = document.getElementById('edit-quality');
@@ -52,6 +89,7 @@ const editYield = document.getElementById('edit-yield');
 const editLocation = document.getElementById('edit-location');
 const modalSaveBtn = document.getElementById('modal-save-btn');
 const modalCancelBtn = document.getElementById('modal-cancel-btn');
+const editMinerSelect = document.getElementById('edit-miner');
 
 // Miner Edit Modal Elements
 const minerEditModal = document.getElementById('miner-edit-modal');
@@ -67,9 +105,15 @@ const reviewSaveAllBtn = document.getElementById('review-save-all-btn');
 const reviewCancelBtn = document.getElementById('review-cancel-btn');
 const reviewRetryBtn = document.getElementById('review-retry-btn');
 
+// Transfer Modal Elements
+const transferModal = document.getElementById('transfer-modal');
+const transferYieldId = document.getElementById('transfer-yield-id');
+const transferLocationInput = document.getElementById('transfer-location');
+const transferConfirmBtn = document.getElementById('transfer-confirm-btn');
+const transferCancelBtn = document.getElementById('transfer-cancel-btn');
+
 // Manual Entry Elements
 const manualMat = document.getElementById('manual-mat');
-const manualLocation = document.getElementById('manual-location');
 const manualQuality = document.getElementById('manual-quality');
 const manualYield = document.getElementById('manual-yield');
 const manualAddBtn = document.getElementById('manual-add-btn');
@@ -84,6 +128,11 @@ const sortYieldHeader = document.getElementById('sort-yield');
 const sortStatsNameHeader = document.getElementById('sort-stats-name');
 const sortStatsQualityHeader = document.getElementById('sort-stats-quality');
 const sortStatsYieldHeader = document.getElementById('sort-stats-yield');
+const sortOreMinerHeader = document.getElementById('sort-ore-miner');
+const sortOreMaterialHeader = document.getElementById('sort-ore-material');
+const sortOreLocationHeader = document.getElementById('sort-ore-location');
+const sortOreQualityHeader = document.getElementById('sort-ore-quality');
+const sortOreQuantityHeader = document.getElementById('sort-ore-quantity');
 
 let currentViewedLocation = null;
 let currentSortColumn = 'quality';
@@ -92,18 +141,20 @@ let currentSortOrder = 'DESC';
 let currentStatsSortColumn = 'name';
 let currentStatsSortOrder = 'ASC';
 
+let currentOreSortColumn = 'miner';
+let currentOreSortOrder = 'ASC';
+
 let lastProcessedImagePath = null;
 
 // Initialize
-loadLocations();
 loadMiners();
 loadSyncSettings();
 updateSortIndicators();
 updateStatsSortIndicators();
+updateOreSortIndicators();
 
 ipcRenderer.on('sync-complete', () => {
     syncStatusDiv.textContent = `Last synced: ${new Date().toLocaleTimeString()}`;
-    loadLocations();
     loadMiners();
 });
 
@@ -117,7 +168,10 @@ async function loadSyncSettings() {
     if (peerUuids.length === 0) {
         peerListDiv.innerHTML = '<p style="color: #888; margin: 0; font-style: italic;">No peers added yet.</p>';
     } else {
-        peerUuids.forEach(uuid => {
+        peerUuids.forEach(peer => {
+            const uuid = typeof peer === 'string' ? peer : peer.uuid;
+            const nickname = typeof peer === 'object' ? peer.nickname : '';
+            
             const div = document.createElement('div');
             div.style.display = 'flex';
             div.style.justifyContent = 'space-between';
@@ -128,7 +182,10 @@ async function loadSyncSettings() {
             div.style.borderRadius = '4px';
             
             div.innerHTML = `
-                <span style="font-family: monospace;">${uuid}</span>
+                <div style="display: flex; flex-direction: column;">
+                    ${nickname ? `<span style="font-weight: bold; color: #00d2ff;">${nickname}</span>` : ''}
+                    <span style="font-family: monospace; font-size: 0.9em; color: #aaa;">${uuid}</span>
+                </div>
                 <button class="secondary delete-btn" style="margin: 0; padding: 2px 8px; font-size: 0.8em;">Remove</button>
             `;
             
@@ -143,23 +200,35 @@ async function loadSyncSettings() {
 }
 
 appTitle.addEventListener('click', () => {
-    switchView('list');
+    switchView('dashboard');
 });
 
-navOresBtn.addEventListener('click', () => {
-    switchView('list');
+dashMiningBtn.addEventListener('click', () => {
+    switchView('mining');
 });
 
-navMinersBtn.addEventListener('click', () => {
-    switchView('miners');
+dashInventoryBtn.addEventListener('click', () => {
+    switchView('inventory');
 });
 
 navStatsBtn.addEventListener('click', () => {
     switchView('statistics');
 });
 
-navSyncBtn.addEventListener('click', () => {
+navOreLocationBtn.addEventListener('click', () => {
+    switchView('ore-location');
+});
+
+navMinersBtn.addEventListener('click', () => {
+    switchView('miners');
+});
+
+dashSyncBtn.addEventListener('click', () => {
     switchView('sync');
+});
+
+navDashboardBtn.addEventListener('click', () => {
+    switchView('dashboard');
 });
 
 copySyncUuidBtn.addEventListener('click', () => {
@@ -170,10 +239,12 @@ copySyncUuidBtn.addEventListener('click', () => {
 
 addPeerBtn.addEventListener('click', async () => {
     const peerUuid = peerUuidInput.value.trim();
+    const nickname = peerNicknameInput.value.trim();
     if (!peerUuid) return;
-    const added = await ipcRenderer.invoke('add-peer-uuid', peerUuid);
+    const added = await ipcRenderer.invoke('add-peer-uuid', peerUuid, nickname);
     if (added) {
         peerUuidInput.value = '';
+        peerNicknameInput.value = '';
         loadSyncSettings();
     } else {
         alert('Peer already exists or invalid UUID.');
@@ -181,11 +252,31 @@ addPeerBtn.addEventListener('click', async () => {
 });
 
 backToListBtn.addEventListener('click', () => {
-    switchView('list');
+    switchView('mining');
 });
 
 backToStatsBtn.addEventListener('click', () => {
     switchView('statistics');
+});
+
+backToMiningFromMiners.addEventListener('click', () => {
+    switchView('mining');
+});
+
+backToMiningFromStats.addEventListener('click', () => {
+    switchView('mining');
+});
+
+backToMiningFromOreLoc.addEventListener('click', () => {
+    switchView('mining');
+});
+
+backToDashFromSync.addEventListener('click', () => {
+    switchView('dashboard');
+});
+
+backToDashFromInventory.addEventListener('click', () => {
+    switchView('dashboard');
 });
 
 // sortMaterialHeader.addEventListener('click', () => {
@@ -210,6 +301,26 @@ sortStatsQualityHeader.addEventListener('click', () => {
 
 sortStatsYieldHeader.addEventListener('click', () => {
     handleStatsSort('total_yield');
+});
+
+sortOreMinerHeader.addEventListener('click', () => {
+    handleOreSort('miner');
+});
+
+sortOreMaterialHeader.addEventListener('click', () => {
+    handleOreSort('material');
+});
+
+sortOreLocationHeader.addEventListener('click', () => {
+    handleOreSort('location');
+});
+
+sortOreQualityHeader.addEventListener('click', () => {
+    handleOreSort('quality');
+});
+
+sortOreQuantityHeader.addEventListener('click', () => {
+    handleOreSort('quantity');
 });
 
 function handleSort(column) {
@@ -256,6 +367,18 @@ function handleStatsSort(column) {
     loadMinerStats();
 }
 
+function handleOreSort(column) {
+    if (currentOreSortColumn === column) {
+        currentOreSortOrder = currentOreSortOrder === 'ASC' ? 'DESC' : 'ASC';
+    } else {
+        currentOreSortColumn = column;
+        currentOreSortOrder = 'ASC';
+    }
+    
+    updateOreSortIndicators();
+    loadOreLocations();
+}
+
 function updateStatsSortIndicators() {
     const nameArrow = sortStatsNameHeader.querySelector('span');
     const qualityArrow = sortStatsQualityHeader.querySelector('span');
@@ -276,51 +399,33 @@ function updateStatsSortIndicators() {
     }
 }
 
-clearDbBtn.addEventListener('click', async () => {
-    const confirmed = await ipcRenderer.invoke('show-confirm-dialog', 'Are you sure you want to delete ALL mining data? This cannot be undone.');
-    if (confirmed) {
-        await ipcRenderer.invoke('clear-database');
-        await refreshCurrentView();
-        statusDiv.textContent = 'Database cleared.';
+function updateOreSortIndicators() {
+    const minerArrow = sortOreMinerHeader.querySelector('span');
+    const materialArrow = sortOreMaterialHeader.querySelector('span');
+    const locationArrow = sortOreLocationHeader.querySelector('span');
+    const qualityArrow = sortOreQualityHeader.querySelector('span');
+    const quantityArrow = sortOreQuantityHeader.querySelector('span');
+    
+    if (minerArrow) minerArrow.innerHTML = '&nbsp;';
+    if (materialArrow) materialArrow.innerHTML = '&nbsp;';
+    if (locationArrow) locationArrow.innerHTML = '&nbsp;';
+    if (qualityArrow) qualityArrow.innerHTML = '&nbsp;';
+    if (quantityArrow) quantityArrow.innerHTML = '&nbsp;';
+    
+    const indicator = currentOreSortOrder === 'ASC' ? '▲' : '▼';
+    
+    if (currentOreSortColumn === 'miner') {
+        if (minerArrow) minerArrow.textContent = indicator;
+    } else if (currentOreSortColumn === 'material') {
+        if (materialArrow) materialArrow.textContent = indicator;
+    } else if (currentOreSortColumn === 'location') {
+        if (locationArrow) locationArrow.textContent = indicator;
+    } else if (currentOreSortColumn === 'quality') {
+        if (qualityArrow) qualityArrow.textContent = indicator;
+    } else if (currentOreSortColumn === 'quantity') {
+        if (quantityArrow) quantityArrow.textContent = indicator;
     }
-});
-
-exportCsvBtn.addEventListener('click', async () => {
-    try {
-        const yields = await ipcRenderer.invoke('get-all-yields');
-        if (yields.length === 0) {
-            await ipcRenderer.invoke('show-alert-dialog', 'No data to export.');
-            return;
-        }
-
-        // CSV Header: Location, Ore, Quality, Quantity (Yield)
-        let csvContent = 'Location,Ore,Quality,Quantity\n';
-        yields.forEach(row => {
-            csvContent += `"${row.location}","${row.material}",${row.quality},${row.yield_cscu}\n`;
-        });
-
-        const success = await ipcRenderer.invoke('save-csv', csvContent);
-        if (success) {
-            statusDiv.textContent = 'Export successful.';
-        }
-    } catch (error) {
-        console.error('Export failed:', error);
-        await ipcRenderer.invoke('show-alert-dialog', 'Export failed: ' + error.message);
-    }
-});
-
-importCsvBtn.addEventListener('click', async () => {
-    try {
-        const success = await ipcRenderer.invoke('import-csv');
-        if (success) {
-            statusDiv.textContent = 'Import successful.';
-            await refreshCurrentView();
-        }
-    } catch (error) {
-        console.error('Import failed:', error);
-        await ipcRenderer.invoke('show-alert-dialog', 'Import failed: ' + error.message);
-    }
-});
+}
 
 fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -617,7 +722,11 @@ async function loadMiners() {
     // Update dropdowns
     const dropdowns = [globalMinerSelect, editMinerSelect];
     dropdowns.forEach(select => {
-        const currentValue = select.value;
+        if (!select) {
+            console.warn('Dropdown element missing, skipping population.');
+            return;
+        }
+        let currentValue = select.value;
         select.innerHTML = '<option value="">Select a Miner...</option>';
         miners.forEach(miner => {
             const option = document.createElement('option');
@@ -625,10 +734,10 @@ async function loadMiners() {
             option.textContent = miner.name;
             select.appendChild(option);
         });
-        select.value = currentValue;
-        // If current value is no longer in the list, reset to empty
-        if (select.selectedIndex === -1) {
-            select.value = '';
+
+        // Try to restore previous selection
+        if (currentValue) {
+            select.value = currentValue;
         }
     });
 
@@ -738,40 +847,49 @@ async function loadLocationDetails(location) {
 }
 
 function switchView(view) {
-    viewOreList.classList.remove('active');
+    viewDashboard.classList.remove('active');
+    viewMiningList.classList.remove('active');
     viewOreDetails.classList.remove('active');
     viewMinerList.classList.remove('active');
     viewStatistics.classList.remove('active');
     viewMinerDetails.classList.remove('active');
     viewSync.classList.remove('active');
+    viewOrders.classList.remove('active');
+    viewCompletedOrders.classList.remove('active');
+    viewOrderDetails.classList.remove('active');
+    viewOreLocation.classList.remove('active');
+    viewInventory.classList.remove('active');
 
-    // Toggle global entry sections based on view
-    const isEntryVisible = (view === 'list' || view === 'details');
-    const displayStyle = isEntryVisible ? 'block' : 'none';
-    minerSelectionContainer.style.display = displayStyle;
-    uploadContainer.style.display = displayStyle;
-    manualEntryContainer.style.display = displayStyle;
-    
-    // Manage nav button active states
-    navOresBtn.classList.toggle('secondary', view !== 'list');
-    navMinersBtn.classList.toggle('secondary', view !== 'miners');
-    navStatsBtn.classList.toggle('secondary', view !== 'statistics');
-    navSyncBtn.classList.toggle('secondary', view !== 'sync');
-
-    if (view === 'list') {
-        viewOreList.classList.add('active');
-        loadLocations();
+    if (view === 'dashboard') {
+        viewDashboard.classList.add('active');
+    } else if (view === 'mining') {
+        viewMiningList.classList.add('active');
+        // No longer calling loadLocations() as ore-container was removed
     } else if (view === 'miners') {
         viewMinerList.classList.add('active');
         loadMiners();
     } else if (view === 'statistics') {
         viewStatistics.classList.add('active');
         loadMinerStats();
+    } else if (view === 'ore-location') {
+        viewOreLocation.classList.add('active');
+        loadOreLocations();
+    } else if (view === 'inventory') {
+        viewInventory.classList.add('active');
+        loadInventory();
     } else if (view === 'sync') {
         viewSync.classList.add('active');
         loadSyncSettings();
     } else if (view === 'miner-details') {
         viewMinerDetails.classList.add('active');
+    } else if (view === 'orders') {
+        viewOrders.classList.add('active');
+        loadOrders();
+    } else if (view === 'completed-orders') {
+        viewCompletedOrders.classList.add('active');
+        loadCompletedOrders();
+    } else if (view === 'order-details') {
+        viewOrderDetails.classList.add('active');
     } else {
         viewOreDetails.classList.add('active');
     }
@@ -782,14 +900,24 @@ async function refreshCurrentView() {
         await loadLocationDetails(currentViewedLocation);
     } else if (viewStatistics.classList.contains('active')) {
         await loadMinerStats();
+    } else if (viewOreLocation.classList.contains('active')) {
+        await loadOreLocations();
     } else if (viewMinerDetails.classList.contains('active')) {
         await loadMinerDetails(currentMinerNameHeader.textContent);
     } else if (viewMinerList.classList.contains('active')) {
         await loadMiners();
     } else if (viewSync.classList.contains('active')) {
         await loadSyncSettings();
+    } else if (viewOrders.classList.contains('active')) {
+        await loadOrders();
+    } else if (viewInventory.classList.contains('active')) {
+        await loadInventory();
+    } else if (viewCompletedOrders.classList.contains('active')) {
+        await loadCompletedOrders();
+    } else if (viewOrderDetails.classList.contains('active')) {
+        // No auto-refresh for order details yet, or refresh if we have a currentOrderUuid
     } else {
-        await loadLocations();
+        // No auto-refresh for default view (locations) if needed, but it's removed
     }
 }
 
@@ -802,6 +930,10 @@ window.deleteYield = async (id) => {
 };
 
 window.openEditModal = (id, material, quality, yield_cscu, miner_name, location, quantityOnly = false) => {
+    editModal.dataset.isInventory = 'false';
+    editModalTitle.textContent = 'Edit Record';
+    editYieldLabel.textContent = 'Yield (cSCU):';
+
     editId.value = id;
     editMat.value = material;
     editQuality.value = Math.round(quality);
@@ -809,13 +941,51 @@ window.openEditModal = (id, material, quality, yield_cscu, miner_name, location,
     editMinerSelect.value = (miner_name && miner_name !== 'Unknown') ? miner_name : '';
     editLocation.value = location || '';
     
+    // Reset display of all rows
+    editMatRow.style.display = 'block';
+    editQualityRow.style.display = 'block';
+    editYieldRow.style.display = 'block';
+    editMinerRow.style.display = 'flex';
+    editLocationRow.style.display = 'block';
+
     // If quantityOnly is true, disable other fields as per user request
     editMat.disabled = quantityOnly;
     editQuality.disabled = quantityOnly;
     editMinerSelect.disabled = quantityOnly;
     editLocation.disabled = quantityOnly;
-    editMinerRow.style.display = quantityOnly ? 'none' : 'flex';
-    editModal.dataset.quantityOnly = quantityOnly;
+    editYield.disabled = false;
+
+    if (quantityOnly) {
+        editMinerRow.style.display = 'none';
+        editModal.dataset.quantityOnly = 'true';
+    } else {
+        editModal.dataset.quantityOnly = 'false';
+    }
+    
+    editModal.style.display = 'block';
+};
+
+window.openInventoryEditModal = (id, material, quality, quantity, location) => {
+    editModal.dataset.isInventory = 'true';
+    editModalTitle.textContent = 'Edit Inventory';
+    editYieldLabel.textContent = 'Quantity (cSCU):';
+    
+    editId.value = id;
+    editMat.value = material;
+    editQuality.value = Math.round(quality);
+    editYield.value = Math.round(quantity);
+    editLocation.value = location || '';
+    
+    // Show Material and Quality as disabled, hide Miner
+    editMatRow.style.display = 'block';
+    editMat.disabled = true;
+    editQualityRow.style.display = 'block';
+    editQuality.disabled = true;
+    editYieldRow.style.display = 'block';
+    editYield.disabled = false;
+    editMinerRow.style.display = 'none';
+    editLocationRow.style.display = 'block';
+    editLocation.disabled = false;
     
     editModal.style.display = 'block';
 };
@@ -825,6 +995,23 @@ modalCancelBtn.onclick = () => {
 };
 
 modalSaveBtn.onclick = async () => {
+    const isInventory = editModal.dataset.isInventory === 'true';
+    if (isInventory) {
+        const id = parseInt(editId.value);
+        const quantity = Math.round(parseFloat(editYield.value)) || 0;
+        const location = editLocation.value.trim() || 'Unknown';
+        
+        if (isNaN(quantity) || quantity < 0) {
+            await ipcRenderer.invoke('show-alert-dialog', 'Quantity must be a positive number.');
+            return;
+        }
+        
+        await ipcRenderer.invoke('update-inventory', { id, quantity, location });
+        await loadInventory();
+        editModal.style.display = 'none';
+        return;
+    }
+
     const isQuantityOnly = editModal.dataset.quantityOnly === 'true';
     let miner_name = editMinerSelect.value;
     let location = editLocation.value.trim();
@@ -851,40 +1038,83 @@ modalSaveBtn.onclick = async () => {
 };
 
 manualAddBtn.addEventListener('click', async () => {
+    console.log('Add Entry button clicked!');
+    manualStatus.textContent = 'Processing...';
+    
     const material = manualMat.value.trim();
-    const quality = Math.round(parseFloat(manualQuality.value));
-    const yield_cscu = Math.round(parseFloat(manualYield.value));
+    const qualityStr = manualQuality.value.trim();
+    const yieldStr = manualYield.value.trim();
+    
+    const miner_name = globalMinerSelect.value;
+    const location = globalLocationSelect.value.trim();
 
-    if (!material) {
-        manualStatus.textContent = 'Error: Material name is required.';
+    console.log('Manual Entry Data:', { material, qualityStr, yieldStr, miner_name, location });
+
+    // 1. Miner Validation
+    if (!miner_name || miner_name === "") {
+        manualStatus.textContent = 'Error: "Select a Miner..." hasn\'t been changed to an actual miner or None.';
         return;
     }
 
+    // 2. Location Validation
+    if (!location) {
+        manualStatus.textContent = 'Error: No Active Location has been selected.';
+        return;
+    }
+
+    // 3. Ore / Image Validation
+    if (!material && !lastProcessedImagePath) {
+        manualStatus.textContent = 'Error: No ore has been selected for Manual Entry and no image has been uploaded.';
+        return;
+    }
+    
+    if (!material) {
+        manualStatus.textContent = 'Error: No ore has been selected for Manual Entry.';
+        return;
+    }
+
+    // 4. Quality Validation
+    if (!qualityStr) {
+        manualStatus.textContent = 'Error: No Quality has been input for a Manual Entry.';
+        return;
+    }
+    const quality = Math.round(parseFloat(qualityStr));
     if (isNaN(quality) || quality < 0 || quality > 999) {
         manualStatus.textContent = 'Error: Quality must be a number between 0 and 999.';
         return;
     }
 
+    // 5. Quantity (Yield) Validation
+    if (!yieldStr) {
+        manualStatus.textContent = 'Error: No Quantity has been input for a Manual Entry.';
+        return;
+    }
+    const yield_cscu = Math.round(parseFloat(yieldStr));
     if (isNaN(yield_cscu) || yield_cscu < 0) {
         manualStatus.textContent = 'Error: Yield must be a positive number.';
         return;
     }
 
-    manualStatus.textContent = 'Saving...';
+    if (yield_cscu === 0) {
+        manualStatus.innerHTML = '<span style="color: #ffaa00;">Warning: Yield is 0, this entry will be saved but might not show in some lists.</span>';
+    } else {
+        manualStatus.textContent = 'Saving...';
+    }
 
     try {
-        const miner_name = globalMinerSelect.value;
-        const location = manualLocation.value.trim() || globalLocationSelect.value.trim();
-        if (!miner_name) {
-            manualStatus.textContent = 'Error: Please select an Active Miner.';
-            return;
+        console.log('Invoking save-yield with data:', { material, quality, yield_cscu, miner_name, location });
+        const result = await ipcRenderer.invoke('save-yield', { material, quality, yield_cscu, miner_name, location });
+        console.log('Save result received:', result);
+        
+        const successMsg = `Success: Added ${material} (Q: ${quality}, Y: ${yield_cscu}) at ${location} for ${miner_name}`;
+        if (yield_cscu === 0) {
+            manualStatus.innerHTML = `<span style="color: #44ff44;">${successMsg}</span> <br><span style="color: #ffaa00;">(Reminder: 0 yield entries are hidden from the main list)</span>`;
+        } else {
+            manualStatus.textContent = successMsg;
         }
-        await ipcRenderer.invoke('save-yield', { material, quality, yield_cscu, miner_name, location: location || 'Unknown' });
-        manualStatus.textContent = `Success: Added ${material} (Q: ${quality}, Y: ${yield_cscu}) at ${location || 'Unknown'} for ${miner_name}`;
         
         // Reset form
         manualMat.value = '';
-        manualLocation.value = '';
         manualQuality.value = '';
         manualYield.value = '';
         
@@ -1024,3 +1254,289 @@ async function loadMinerDetails(minerName) {
         minerDetailsBody.appendChild(tr);
     });
 }
+
+async function loadOreLocations() {
+    const rows = await ipcRenderer.invoke('get-ore-locations-by-miner');
+    
+    // Sort logic in JS to handle grouping requirements
+    const sortedRows = [...rows].sort((a, b) => {
+        // Primary sort: Miner Name (to keep them grouped)
+        const minerA = (a.miner_name || '').toLowerCase();
+        const minerB = (b.miner_name || '').toLowerCase();
+        
+        // If the primary sort is Miner Name, we use the user's requested order
+        // Otherwise, we use ASC to keep grouping consistent
+        const primaryOrder = currentOreSortColumn === 'miner' ? (currentOreSortOrder === 'ASC' ? 1 : -1) : 1;
+        
+        if (minerA < minerB) return -1 * primaryOrder;
+        if (minerA > minerB) return 1 * primaryOrder;
+        
+        // Secondary sort: Selected column (if not Miner Name)
+        if (currentOreSortColumn !== 'miner') {
+            const secondaryOrder = currentOreSortOrder === 'ASC' ? 1 : -1;
+            let valA, valB;
+            
+            if (currentOreSortColumn === 'quality') {
+                valA = a.quality || 0;
+                valB = b.quality || 0;
+            } else if (currentOreSortColumn === 'material') {
+                valA = (a.material || '').toLowerCase();
+                valB = (b.material || '').toLowerCase();
+            } else if (currentOreSortColumn === 'location') {
+                valA = (a.location || '').toLowerCase();
+                valB = (b.location || '').toLowerCase();
+            } else if (currentOreSortColumn === 'quantity') {
+                valA = a.yield_cscu || 0;
+                valB = b.yield_cscu || 0;
+            }
+            
+            if (valA < valB) return -1 * secondaryOrder;
+            if (valA > valB) return 1 * secondaryOrder;
+        }
+        
+        // Tertiary sort: Timestamp (newest first)
+        return new Date(b.timestamp) - new Date(a.timestamp);
+    });
+
+    oreLocationBody.innerHTML = '';
+    sortedRows.forEach(row => {
+        const tr = document.createElement('tr');
+        const displayQuality = row.quality !== null ? Math.round(row.quality).toString().padStart(3, '0') : '000';
+        const timestamp = new Date(row.timestamp).toLocaleString();
+        
+        tr.innerHTML = `
+            <td>${row.miner_name}</td>
+            <td>${row.material}</td>
+            <td>${row.location || 'Unknown'}</td>
+            <td>${displayQuality}</td>
+            <td>${Math.round(row.yield_cscu)}</td>
+            <td>${timestamp}</td>
+            <td>
+                <button onclick="transferToInventory(${row.id})">Transfer to Inventory</button>
+            </td>
+        `;
+        oreLocationBody.appendChild(tr);
+    });
+}
+
+navOrdersBtn.addEventListener('click', () => {
+    switchView('orders');
+});
+
+backToMiningFromOrders.addEventListener('click', () => {
+    switchView('mining');
+});
+
+backToOrdersFromCompleted.addEventListener('click', () => {
+    switchView('orders');
+});
+
+backToOrdersFromDetailsBtn.addEventListener('click', () => {
+    switchView('orders');
+});
+
+navCompletedOrdersBtn.addEventListener('click', () => {
+    switchView('completed-orders');
+});
+
+submitOrderBtn.addEventListener('click', async () => {
+    const material = orderOreInput.value.trim();
+    const quantity = parseFloat(orderQuantityInput.value);
+    const min_quality = parseFloat(orderQualitySelect.value);
+
+    if (!material || isNaN(quantity)) {
+        orderSubmitStatus.textContent = 'Please fill in all fields.';
+        orderSubmitStatus.style.color = '#ff4444';
+        return;
+    }
+
+    const success = await ipcRenderer.invoke('add-order', { material, quantity, min_quality });
+    if (success) {
+        orderOreInput.value = '';
+        orderQuantityInput.value = '';
+        orderSubmitStatus.textContent = 'Order submitted successfully!';
+        orderSubmitStatus.style.color = '#00ff00';
+        loadOrders();
+        setTimeout(() => { orderSubmitStatus.textContent = ''; }, 3000);
+    } else {
+        orderSubmitStatus.textContent = 'Failed to submit order.';
+        orderSubmitStatus.style.color = '#ff4444';
+    }
+});
+
+async function loadOrders() {
+    const orders = await ipcRenderer.invoke('get-orders');
+    ordersBody.innerHTML = '';
+    
+    // Only show Pending orders in the main orders list
+    const pendingOrders = orders.filter(o => o.status === 'Pending');
+    
+    if (pendingOrders.length === 0) {
+        ordersBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">No pending orders.</td></tr>';
+        return;
+    }
+
+    pendingOrders.forEach(order => {
+        const tr = document.createElement('tr');
+        tr.className = 'clickable-row';
+        tr.onclick = () => showOrderDetails(order.uuid);
+        const dateStr = new Date(order.created_at).toLocaleString();
+        
+        tr.innerHTML = `
+            <td>${dateStr}</td>
+            <td>${order.material}</td>
+            <td>${Math.round(order.quantity)}</td>
+            <td>${Math.round(order.quantity_mined || 0)}</td>
+            <td>${Math.round(order.min_quality)}</td>
+            <td>
+                <button class="danger" onclick="event.stopPropagation(); deleteOrder('${order.uuid}')">Delete</button>
+            </td>
+        `;
+        ordersBody.appendChild(tr);
+    });
+}
+
+async function loadCompletedOrders() {
+    const orders = await ipcRenderer.invoke('get-orders');
+    completedOrdersBody.innerHTML = '';
+    
+    // Only show Completed orders
+    const completedOrders = orders.filter(o => o.status === 'Completed');
+    
+    if (completedOrders.length === 0) {
+        completedOrdersBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">No completed orders.</td></tr>';
+        return;
+    }
+
+    completedOrders.forEach(order => {
+        const tr = document.createElement('tr');
+        tr.className = 'clickable-row';
+        tr.onclick = () => showOrderDetails(order.uuid);
+        const dateStr = new Date(order.created_at).toLocaleString();
+        
+        tr.innerHTML = `
+            <td>${dateStr}</td>
+            <td>${order.material}</td>
+            <td>${Math.round(order.quantity)}</td>
+            <td>${Math.round(order.quantity_mined || 0)}</td>
+            <td>${Math.round(order.min_quality)}</td>
+            <td>
+                <button class="danger" onclick="event.stopPropagation(); deleteOrder('${order.uuid}')">Delete</button>
+            </td>
+        `;
+        completedOrdersBody.appendChild(tr);
+    });
+}
+
+async function showOrderDetails(uuid) {
+    const details = await ipcRenderer.invoke('get-order-details', uuid);
+    if (!details) return;
+
+    const { order, contributions } = details;
+    
+    switchView('order-details');
+    orderDetailsTitle.textContent = `Order: ${order.material}`;
+    
+    orderSummaryDiv.innerHTML = `
+        <p><strong>Quantity Rqd:</strong> ${Math.round(order.quantity)} | 
+           <strong>Quantity Mined:</strong> ${Math.round(order.quantity_mined || 0)} | 
+           <strong>Min Quality:</strong> ${Math.round(order.min_quality)}</p>
+        <p><strong>Status:</strong> ${order.status}</p>
+    `;
+
+    orderContributionsBody.innerHTML = '';
+    if (contributions.length === 0) {
+        orderContributionsBody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">No contributions recorded yet.</td></tr>';
+    } else {
+        contributions.forEach(c => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>${new Date(c.timestamp).toLocaleString()}</td>
+                <td>${c.miner_name}</td>
+                <td>${c.material}</td>
+                <td>${Math.round(c.quantity)}</td>
+                <td>${Math.round(c.quality)}</td>
+            `;
+            orderContributionsBody.appendChild(tr);
+        });
+    }
+}
+
+window.updateOrderStatus = async (uuid, status) => {
+    await ipcRenderer.invoke('update-order-status', { uuid, status });
+    await refreshCurrentView();
+};
+
+window.deleteOrder = async (uuid) => {
+    const confirmed = await ipcRenderer.invoke('show-confirm-dialog', 'Are you sure you want to delete this order?');
+    if (confirmed) {
+        await ipcRenderer.invoke('delete-order', uuid);
+        await refreshCurrentView();
+    }
+};
+
+async function loadInventory() {
+    const inventory = await ipcRenderer.invoke('get-inventory');
+    inventoryBody.innerHTML = '';
+    
+    if (inventory.length === 0) {
+        inventoryBody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Inventory is empty.</td></tr>';
+        return;
+    }
+
+    inventory.forEach(item => {
+        const tr = document.createElement('tr');
+        const displayQuality = item.quality !== null ? Math.round(item.quality).toString().padStart(3, '0') : '000';
+        const displayQuantity = Math.round(item.quantity).toString();
+        const displayLocation = item.location || 'Unknown';
+        
+        tr.innerHTML = `
+            <td>${item.material}</td>
+            <td>${displayQuality}</td>
+            <td>${displayQuantity}</td>
+            <td>${displayLocation}</td>
+            <td>
+                <button class="secondary" onclick="openInventoryEditModal(${item.id}, '${item.material.replace(/'/g, "\\'")}', ${item.quality}, ${item.quantity}, '${(item.location || 'Unknown').replace(/'/g, "\\'")}')">Edit</button>
+                <button class="danger" onclick="deleteInventory(${item.id})">Remove</button>
+            </td>
+        `;
+        inventoryBody.appendChild(tr);
+    });
+}
+
+window.transferToInventory = async (yieldId) => {
+    // Open the location selection modal instead of calling directly
+    transferYieldId.value = yieldId;
+    transferLocationInput.value = globalLocationSelect.value || ''; // Pre-fill with global location if set
+    transferModal.style.display = 'block';
+};
+
+transferConfirmBtn.onclick = async () => {
+    const yieldId = transferYieldId.value;
+    const location = transferLocationInput.value.trim();
+    
+    if (!location) {
+        await ipcRenderer.invoke('show-alert-dialog', 'Please enter or select a location.');
+        return;
+    }
+
+    try {
+        await ipcRenderer.invoke('transfer-to-inventory', { yieldId, location });
+        transferModal.style.display = 'none';
+        await refreshCurrentView();
+    } catch (err) {
+        await ipcRenderer.invoke('show-alert-dialog', 'Error transferring to inventory: ' + err.message);
+    }
+};
+
+transferCancelBtn.onclick = () => {
+    transferModal.style.display = 'none';
+};
+
+window.deleteInventory = async (id) => {
+    const confirmed = await ipcRenderer.invoke('show-confirm-dialog', 'Are you sure you want to remove this item from inventory?');
+    if (confirmed) {
+        await ipcRenderer.invoke('delete-inventory', id);
+        await loadInventory();
+    }
+};
