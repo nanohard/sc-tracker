@@ -133,6 +133,10 @@ const sortOreMaterialHeader = document.getElementById('sort-ore-material');
 const sortOreLocationHeader = document.getElementById('sort-ore-location');
 const sortOreQualityHeader = document.getElementById('sort-ore-quality');
 const sortOreQuantityHeader = document.getElementById('sort-ore-quantity');
+const sortInventoryMaterialHeader = document.getElementById('sort-inventory-material');
+const sortInventoryQualityHeader = document.getElementById('sort-inventory-quality');
+const sortInventoryQuantityHeader = document.getElementById('sort-inventory-quantity');
+const sortInventoryLocationHeader = document.getElementById('sort-inventory-location');
 
 let currentViewedLocation = null;
 let currentSortColumn = 'quality';
@@ -144,6 +148,9 @@ let currentStatsSortOrder = 'ASC';
 let currentOreSortColumn = 'miner';
 let currentOreSortOrder = 'ASC';
 
+let currentInventorySortColumn = 'material';
+let currentInventorySortOrder = 'ASC';
+
 let lastProcessedImagePath = null;
 
 // Initialize
@@ -152,6 +159,7 @@ loadSyncSettings();
 updateSortIndicators();
 updateStatsSortIndicators();
 updateOreSortIndicators();
+updateInventorySortIndicators();
 
 ipcRenderer.on('sync-complete', () => {
     syncStatusDiv.textContent = `Last synced: ${new Date().toLocaleTimeString()}`;
@@ -323,6 +331,22 @@ sortOreQuantityHeader.addEventListener('click', () => {
     handleOreSort('quantity');
 });
 
+sortInventoryMaterialHeader.addEventListener('click', () => {
+    handleInventorySort('material');
+});
+
+sortInventoryQualityHeader.addEventListener('click', () => {
+    handleInventorySort('quality');
+});
+
+sortInventoryQuantityHeader.addEventListener('click', () => {
+    handleInventorySort('quantity');
+});
+
+sortInventoryLocationHeader.addEventListener('click', () => {
+    handleInventorySort('location');
+});
+
 function handleSort(column) {
     if (currentSortColumn === column) {
         currentSortOrder = currentSortOrder === 'ASC' ? 'DESC' : 'ASC';
@@ -379,6 +403,18 @@ function handleOreSort(column) {
     loadOreLocations();
 }
 
+function handleInventorySort(column) {
+    if (currentInventorySortColumn === column) {
+        currentInventorySortOrder = currentInventorySortOrder === 'ASC' ? 'DESC' : 'ASC';
+    } else {
+        currentInventorySortColumn = column;
+        currentInventorySortOrder = column === 'material' || column === 'location' ? 'ASC' : 'DESC';
+    }
+    
+    updateInventorySortIndicators();
+    loadInventory();
+}
+
 function updateStatsSortIndicators() {
     const nameArrow = sortStatsNameHeader.querySelector('span');
     const qualityArrow = sortStatsQualityHeader.querySelector('span');
@@ -424,6 +460,30 @@ function updateOreSortIndicators() {
         if (qualityArrow) qualityArrow.textContent = indicator;
     } else if (currentOreSortColumn === 'quantity') {
         if (quantityArrow) quantityArrow.textContent = indicator;
+    }
+}
+
+function updateInventorySortIndicators() {
+    const materialArrow = sortInventoryMaterialHeader.querySelector('span');
+    const qualityArrow = sortInventoryQualityHeader.querySelector('span');
+    const quantityArrow = sortInventoryQuantityHeader.querySelector('span');
+    const locationArrow = sortInventoryLocationHeader.querySelector('span');
+    
+    if (materialArrow) materialArrow.innerHTML = '&nbsp;';
+    if (qualityArrow) qualityArrow.innerHTML = '&nbsp;';
+    if (quantityArrow) quantityArrow.innerHTML = '&nbsp;';
+    if (locationArrow) locationArrow.innerHTML = '&nbsp;';
+    
+    const indicator = currentInventorySortOrder === 'ASC' ? '▲' : '▼';
+    
+    if (currentInventorySortColumn === 'material') {
+        if (materialArrow) materialArrow.textContent = indicator;
+    } else if (currentInventorySortColumn === 'quality') {
+        if (qualityArrow) qualityArrow.textContent = indicator;
+    } else if (currentInventorySortColumn === 'quantity') {
+        if (quantityArrow) quantityArrow.textContent = indicator;
+    } else if (currentInventorySortColumn === 'location') {
+        if (locationArrow) locationArrow.textContent = indicator;
     }
 }
 
@@ -1476,7 +1536,10 @@ window.deleteOrder = async (uuid) => {
 };
 
 async function loadInventory() {
-    const inventory = await ipcRenderer.invoke('get-inventory');
+    const inventory = await ipcRenderer.invoke('get-inventory', {
+        column: currentInventorySortColumn,
+        order: currentInventorySortOrder
+    });
     inventoryBody.innerHTML = '';
     
     if (inventory.length === 0) {

@@ -1,327 +1,17 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { ipcMain, app, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const Tesseract = require('tesseract.js');
 const { Jimp } = require('jimp');
-const hyperswarm = require('hyperswarm');
 const crypto = require('crypto');
-const { db, initPromise } = require('./database');
+const { db } = require('./database');
+const { broadcastSync } = require('./sync');
 
 let mainWindow;
-let swarm;
-const peers = new Set();
-let localSyncUuid;
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 800,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-      sandbox: false, // Required for nodeIntegration in modern Electron
-    },
-  });
-
-  mainWindow.loadFile('index.html');
+function setMainWindow(win) {
+  mainWindow = win;
 }
-
-app.whenReady().then(async () => {
-  await initPromise;
-  await initSync();
-  createWindow();
-});
-
-async function initSync() {
-  return new Promise((resolve) => {
-    db.serialize(() => {
-      db.get("SELECT value FROM sync_settings WHERE key = 'local_sync_uuid'", (err, row) => {
-        if (row) {
-          localSyncUuid = row.value;
-          startSwarm();
-          resolve();
-        } else {
-          // If missing, generate it (redundancy with database.js)
-          const newUuid = crypto.randomUUID();
-          db.run("INSERT OR IGNORE INTO sync_settings (key, value) VALUES ('local_sync_uuid', ?)", [newUuid], () => {
-            localSyncUuid = newUuid;
-            startSwarm();
-            resolve();
-          });
-        }
-      });
-    });
-  });
-}
-
-function startSwarm() {
-  if (swarm) return;
-  
-  swarm = new hyperswarm();
-  
-  db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
-    if (row) {
-      const peerUuids = JSON.parse(row.value);
-      const uuids = peerUuids.map(p => typeof p === 'string' ? p : p.uuid);
-      [localSyncUuid, ...uuids].forEach(uuid => {
-        const topic = crypto.createHash('sha256').update(uuid).digest();
-        swarm.join(topic, { lookup: true, announce: true });
-      });
-    }
-  });
-
-  swarm.on('connection', (conn, info) => {
-    console.log('New connection from peer');
-    peers.add(conn);
-    
-    conn.on('data', data => handleSyncData(conn, data));
-    conn.on('close', () => peers.delete(conn));
-    conn.on('error', () => peers.delete(conn));
-
-    // Start sync process
-    initiateSyncWithPeer(conn);
-  });
-
-  // Periodic sync every 10 seconds
-  setInterval(() => {
-    for (const conn of peers) {
-      initiateSyncWithPeer(conn);
-    }
-  }, 10000);
-}
-
-function broadcastSync() {
-  if (peers.size === 0) return;
-  const notification = JSON.stringify({ type: 'sync-notification' });
-  for (const conn of peers) {
-    try {
-      conn.write(notification);
-    } catch (err) {
-      console.error('Failed to send sync notification:', err);
-    }
-  }
-}
-
-async function initiateSyncWithPeer(conn) {
-  const lastSyncTime = await new Promise(resolve => {
-    db.get("SELECT value FROM sync_settings WHERE key = 'last_sync_time'", (err, row) => {
-      resolve(row ? parseInt(row.value) : 0);
-    });
-  });
-
-  conn.write(JSON.stringify({
-    type: 'sync-request',
-    lastSyncTime: lastSyncTime
-  }));
-}
-
-async function handleSyncData(conn, data) {
-  try {
-    const message = JSON.parse(data.toString());
-    
-    if (message.type === 'sync-request') {
-      const peerLastSyncTime = message.lastSyncTime;
-      const updates = await getDatabaseUpdates(peerLastSyncTime);
-      conn.write(JSON.stringify({
-        type: 'sync-response',
-        updates: updates,
-        timestamp: Date.now()
-      }));
-    } else if (message.type === 'sync-response') {
-      await applyDatabaseUpdates(message.updates);
-      db.run("UPDATE sync_settings SET value = ? WHERE key = 'last_sync_time'", [message.timestamp.toString()]);
-      if (mainWindow) mainWindow.webContents.send('sync-complete');
-    } else if (message.type === 'sync-notification') {
-      await initiateSyncWithPeer(conn);
-    }
-  } catch (err) {
-    console.error('Failed to handle sync data:', err);
-  }
-}
-
-async function getDatabaseUpdates(sinceTimestamp) {
-  const sinceStr = new Date(sinceTimestamp).toISOString();
-  
-  const yields = await new Promise(resolve => {
-    db.all("SELECT * FROM yields WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
-  });
-  
-  const miners = await new Promise(resolve => {
-    db.all("SELECT * FROM miners WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
-  });
-
-  const orders = await new Promise(resolve => {
-    db.all("SELECT * FROM orders WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
-  });
-
-  const order_contributions = await new Promise(resolve => {
-    db.all("SELECT * FROM order_contributions WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
-  });
-
-  const inventory = await new Promise(resolve => {
-    db.all("SELECT * FROM inventory WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
-  });
-
-  return { yields, miners, orders, order_contributions, inventory };
-}
-
-async function applyDatabaseUpdates(updates) {
-  const { yields, miners, orders, order_contributions, inventory } = updates;
-
-  for (const miner of miners) {
-    await new Promise(resolve => {
-      db.get("SELECT updated_at, is_deleted FROM miners WHERE uuid = ?", [miner.uuid], (err, row) => {
-        if (!row || new Date(miner.updated_at) > new Date(row.updated_at)) {
-          db.run(`
-            INSERT OR REPLACE INTO miners (uuid, name, total_yield, total_quality_sum, record_count, updated_at, is_deleted)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `, [miner.uuid, miner.name, miner.total_yield, miner.total_quality_sum, miner.record_count, miner.updated_at, miner.is_deleted], () => resolve());
-        } else {
-          resolve();
-        }
-      });
-    });
-  }
-
-  for (const y of yields) {
-    await new Promise(resolve => {
-      db.get("SELECT updated_at, is_deleted FROM yields WHERE uuid = ?", [y.uuid], (err, row) => {
-        if (!row || new Date(y.updated_at) > new Date(row.updated_at)) {
-          db.run(`
-            INSERT OR REPLACE INTO yields (uuid, material, quality, yield_cscu, miner_name, location, timestamp, updated_at, is_deleted)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `, [y.uuid, y.material, y.quality, y.yield_cscu, y.miner_name, y.location, y.timestamp, y.updated_at, y.is_deleted], () => resolve());
-        } else {
-          resolve();
-        }
-      });
-    });
-  }
-
-  if (orders) {
-    for (const order of orders) {
-      await new Promise(resolve => {
-        db.get("SELECT updated_at, is_deleted FROM orders WHERE uuid = ?", [order.uuid], (err, row) => {
-          if (!row || new Date(order.updated_at) > new Date(row.updated_at)) {
-            db.run(`
-              INSERT OR REPLACE INTO orders (uuid, material, quantity, quantity_mined, min_quality, status, created_at, updated_at, is_deleted)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `, [order.uuid, order.material, order.quantity, order.quantity_mined, order.min_quality, order.status, order.created_at, order.updated_at, order.is_deleted], () => resolve());
-          } else {
-            resolve();
-          }
-        });
-      });
-    }
-  }
-
-  if (order_contributions) {
-    for (const contrib of order_contributions) {
-      await new Promise(resolve => {
-        db.get("SELECT updated_at, is_deleted FROM order_contributions WHERE uuid = ?", [contrib.uuid], (err, row) => {
-          if (!row || new Date(contrib.updated_at) > new Date(row.updated_at)) {
-            db.run(`
-              INSERT OR REPLACE INTO order_contributions (uuid, order_uuid, miner_name, material, quantity, quality, timestamp, updated_at, is_deleted)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `, [contrib.uuid, contrib.order_uuid, contrib.miner_name, contrib.material, contrib.quantity, contrib.quality, contrib.timestamp, contrib.updated_at, contrib.is_deleted], () => resolve());
-          } else {
-            resolve();
-          }
-        });
-      });
-    }
-  }
-
-  if (inventory) {
-    for (const item of inventory) {
-      await new Promise(resolve => {
-        db.get("SELECT updated_at, is_deleted FROM inventory WHERE uuid = ?", [item.uuid], (err, row) => {
-          if (!row || new Date(item.updated_at) > new Date(row.updated_at)) {
-            db.run(`
-              INSERT OR REPLACE INTO inventory (uuid, material, quality, quantity, location, updated_at, is_deleted)
-              VALUES (?, ?, ?, ?, ?, ?, ?)
-            `, [item.uuid, item.material, item.quality, item.quantity, item.location, item.updated_at, item.is_deleted], () => resolve());
-          } else {
-            resolve();
-          }
-        });
-      });
-    }
-  }
-}
-
-ipcMain.handle('get-sync-settings', async () => {
-  const settings = {};
-  return new Promise(resolve => {
-    db.all("SELECT key, value FROM sync_settings", (err, rows) => {
-      if (err) {
-        console.error('Error fetching sync settings:', err);
-        resolve(settings);
-        return;
-      }
-      if (rows) {
-        rows.forEach(row => settings[row.key] = row.value);
-      }
-      // If still missing local UUID, and initSync was supposed to handle it
-      if (!settings.local_sync_uuid && localSyncUuid) {
-        settings.local_sync_uuid = localSyncUuid;
-      }
-      resolve(settings);
-    });
-  });
-});
-
-ipcMain.handle('add-peer-uuid', async (event, peerUuid, nickname) => {
-  return new Promise(resolve => {
-    db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
-      const peerUuids = JSON.parse(row.value);
-      const existingPeer = peerUuids.find(p => {
-        if (typeof p === 'string') return p === peerUuid;
-        return p.uuid === peerUuid;
-      });
-
-      if (!existingPeer) {
-        peerUuids.push({ uuid: peerUuid, nickname: nickname });
-        db.run("UPDATE sync_settings SET value = ? WHERE key = 'peer_uuids'", [JSON.stringify(peerUuids)], () => {
-          const topic = crypto.createHash('sha256').update(peerUuid).digest();
-          if (swarm) swarm.join(topic, { lookup: true, announce: true });
-          resolve(true);
-        });
-      } else {
-        resolve(false);
-      }
-    });
-  });
-});
-
-ipcMain.handle('remove-peer-uuid', async (event, peerUuid) => {
-  return new Promise(resolve => {
-    db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
-      let peerUuids = JSON.parse(row.value);
-      peerUuids = peerUuids.filter(p => {
-        if (typeof p === 'string') return p !== peerUuid;
-        return p.uuid !== peerUuid;
-      });
-      db.run("UPDATE sync_settings SET value = ? WHERE key = 'peer_uuids'", [JSON.stringify(peerUuids)], () => {
-        const topic = crypto.createHash('sha256').update(peerUuid).digest();
-        if (swarm) swarm.leave(topic);
-        resolve(true);
-      });
-    });
-  });
-});
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
-
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
-});
 
 // OCR Processing
 ipcMain.handle('process-image', async (event, imagePath) => {
@@ -329,48 +19,38 @@ ipcMain.handle('process-image', async (event, imagePath) => {
     throw new Error('No image path provided to OCR processor.');
   }
 
-  // Pre-process image with Jimp: upscale 5x and high contrast
   const tempPath = path.join(app.getPath('temp'), `processed_${Date.now()}.png`);
   
   try {
     console.log('Pre-processing image...');
     const image = await Jimp.read(imagePath);
     
-    // Resize to 6x original size for better OCR
     const newWidth = image.bitmap.width * 6;
     image.resize({ w: newWidth }); 
     
-    // Convert to grayscale
     image.greyscale();
-    
-    // Normalize and set contrast
     image.normalize();
     image.contrast(0.3); 
     
-    // Thresholding strategy: pure black and white
     image.threshold({ max: 255, replace: 255, auto: true });
-    
-    // Invert to get black text on white background
     image.invert();
     
     await image.write(tempPath);
     console.log('Pre-processing complete. Saved to:', tempPath);
 
-    // Use Tesseract.js
     const worker = await Tesseract.createWorker('eng', 1, {
       logger: m => console.log(m)
     });
 
     await worker.setParameters({
       tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .,\n',
-      tessedit_pageseg_mode: '6', // PSM 6 for a single uniform block of text
-      preserve_interword_spaces: '1', // Help maintain columnar alignment
+      tessedit_pageseg_mode: '6',
+      preserve_interword_spaces: '1',
     });
 
     const { data: { text } } = await worker.recognize(tempPath);
     await worker.terminate();
 
-    // Clean up temporary file
     try {
       fs.unlinkSync(tempPath);
     } catch (err) {
@@ -380,7 +60,6 @@ ipcMain.handle('process-image', async (event, imagePath) => {
     return text;
   } catch (error) {
     console.error('OCR or Pre-processing Error:', error);
-    // Cleanup on error
     if (fs.existsSync(tempPath)) {
       try { fs.unlinkSync(tempPath); } catch(e) {}
     }
@@ -400,7 +79,6 @@ ipcMain.handle('get-locations', async () => {
 
 ipcMain.handle('get-yields-by-location', async (event, { location, sortBy = 'quality', sortOrder = 'DESC' }) => {
   return new Promise((resolve, reject) => {
-    // Whitelist columns and orders to prevent SQL injection
     const allowedColumns = ['quality', 'yield_cscu', 'material'];
     const allowedOrders = ['ASC', 'DESC'];
     
@@ -440,7 +118,6 @@ ipcMain.handle('get-ore-locations-by-miner', async () => {
 async function processOrdersForYield(material, quality, yield_cscu, miner_name) {
   const now = new Date().toISOString();
   return new Promise(resolve => {
-    // Find matching pending orders
     db.all(
       "SELECT * FROM orders WHERE material = ? AND min_quality <= ? AND status = 'Pending' AND is_deleted = 0 ORDER BY min_quality DESC, created_at ASC",
       [material, quality],
@@ -492,11 +169,9 @@ async function processOrdersForYield(material, quality, yield_cscu, miner_name) 
 }
 
 ipcMain.handle('save-yield', async (event, yieldData) => {
-  console.log('Received save-yield request:', yieldData);
   const { material, quality, yield_cscu, miner_name, location } = yieldData;
 
   if (!miner_name || miner_name === 'Unknown') {
-    console.error('save-yield error: Miner name is required.');
     throw new Error('Miner name is required.');
   }
 
@@ -504,17 +179,14 @@ ipcMain.handle('save-yield', async (event, yieldData) => {
   const actualLocation = location || 'Unknown';
   const now = new Date().toISOString();
 
-  // Process orders BEFORE saving the yield to database to use the current yield_cscu correctly
   await processOrdersForYield(material, quality, yield_cscu, actualMinerName);
 
   return new Promise((resolve, reject) => {
     db.serialize(() => {
-      // 1. Ensure miner exists
       db.run('INSERT OR IGNORE INTO miners (name, uuid, updated_at) VALUES (?, ?, ?)', [actualMinerName, crypto.randomUUID(), now], (err) => {
         if (err) console.error('Error inserting miner:', err);
       });
       
-      // 2. Update miner stats (cumulative)
       db.run(`
         UPDATE miners SET 
           total_yield = total_yield + ?, 
@@ -526,8 +198,6 @@ ipcMain.handle('save-yield', async (event, yieldData) => {
         if (err) console.error('Error updating miner stats:', err);
       });
 
-      // 3. Upsert yield record using ON CONFLICT (atomic merge)
-      // Note: material, quality, miner_name, location is the unique index (where is_deleted=0)
       const uuid = crypto.randomUUID();
       db.run(`
         INSERT INTO yields (uuid, material, quality, yield_cscu, miner_name, location, timestamp, updated_at, is_deleted)
@@ -538,12 +208,9 @@ ipcMain.handle('save-yield', async (event, yieldData) => {
           updated_at = excluded.updated_at
       `, [uuid, material, quality, yield_cscu, actualMinerName, actualLocation, now, now, 0], function(err) {
         if (err) {
-          console.error('Error saving yield record:', err);
           reject(err);
         } else {
           broadcastSync();
-          // Find out if it was an insert or update for return value
-          // lastID is only set on INSERT.
           resolve({ id: this.lastID, updated: this.changes === 0 });
         }
       });
@@ -557,10 +224,6 @@ ipcMain.handle('update-yield', async (event, yieldData) => {
     const actualLocation = location || 'Unknown';
     const now = new Date().toISOString();
 
-    // Since updating a yield can change quality or amount, it's complex to "undo" previous order impacts.
-    // However, the requirement says "Any time a miner submits an ore... the Quantity Mined should be increased".
-    // If they EDIT a yield, it's like a new submission of that amount.
-    // To be safe and simple, we'll treat the updated amount as new progress.
     await processOrdersForYield(material, quality, yield_cscu, miner_name);
 
     if (miner_name === 'Aggregated') {
@@ -568,9 +231,7 @@ ipcMain.handle('update-yield', async (event, yieldData) => {
         if (err) return reject(err);
         if (row) {
           db.serialize(() => {
-            // Soft delete old ones
             db.run('UPDATE yields SET is_deleted = 1, updated_at = ? WHERE material = ? AND quality = ? AND location = ? AND is_deleted = 0', [now, row.material, row.quality, row.location]);
-            // Insert new aggregated record
             db.run(
               'INSERT INTO yields (uuid, material, quality, yield_cscu, miner_name, location, timestamp, updated_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
               [crypto.randomUUID(), material, quality, yield_cscu, 'Aggregated', actualLocation, now, now, 0],
@@ -588,11 +249,9 @@ ipcMain.handle('update-yield', async (event, yieldData) => {
     }
 
     const actualMinerName = miner_name;
-    // Check if updating to a material/quality/miner/location that already exists (for merging, excluding deleted)
     db.get('SELECT id, yield_cscu, uuid FROM yields WHERE material = ? AND quality = ? AND miner_name = ? AND location = ? AND id != ? AND is_deleted = 0', [material, quality, actualMinerName, actualLocation, id], (err, row) => {
       if (err) return reject(err);
       if (row) {
-        // Merge into the existing record and soft delete this one
         const newTotalYield = row.yield_cscu + yield_cscu;
         db.serialize(() => {
           db.run('UPDATE yields SET yield_cscu = ?, updated_at = ? WHERE id = ?', [newTotalYield, now, row.id]);
@@ -602,7 +261,6 @@ ipcMain.handle('update-yield', async (event, yieldData) => {
           });
         });
       } else {
-        // Normal update
         db.run(
           'UPDATE yields SET material = ?, quality = ?, yield_cscu = ?, miner_name = ?, location = ?, updated_at = ? WHERE id = ?',
           [material, quality, yield_cscu, actualMinerName, actualLocation, now, id],
@@ -630,7 +288,6 @@ ipcMain.handle('delete-yield', async (event, id) => {
   return result;
 });
 
-// Miner Management Operations
 ipcMain.handle('get-miners', async () => {
   return new Promise((resolve, reject) => {
     db.all('SELECT * FROM miners WHERE is_deleted = 0 ORDER BY name ASC', (err, rows) => {
@@ -705,7 +362,6 @@ ipcMain.handle('import-csv', async (event) => {
   
   if (lines.length < 2) throw new Error('CSV file is empty or missing data.');
 
-  // Header: location, ore, quality, quantity
   const header = lines[0].toLowerCase().split(',').map(h => h.trim().replace(/^"|"$/g, ''));
   const colIndex = {
     location: header.indexOf('location'),
@@ -727,7 +383,6 @@ ipcMain.handle('import-csv', async (event) => {
       let errorOccurred = false;
 
       for (let i = 1; i < lines.length; i++) {
-        // Simple CSV parser that handles quotes
         const parts = [];
         let current = '';
         let inQuotes = false;
@@ -811,33 +466,12 @@ ipcMain.handle('get-yields-by-miner', async (event, minerName) => {
   });
 });
 
-
 ipcMain.handle('clear-database', async () => {
   return new Promise((resolve, reject) => {
     db.run('DELETE FROM yields', (err) => {
       if (err) reject(err);
       else resolve(true);
     });
-  });
-});
-
-ipcMain.handle('show-confirm-dialog', async (event, message) => {
-  const result = await dialog.showMessageBox(mainWindow, {
-    type: 'question',
-    buttons: ['Yes', 'No'],
-    defaultId: 1,
-    title: 'Confirm',
-    message: message,
-  });
-  return result.response === 0;
-});
-
-ipcMain.handle('show-alert-dialog', async (event, message) => {
-  await dialog.showMessageBox(mainWindow, {
-    type: 'info',
-    buttons: ['OK'],
-    title: 'Alert',
-    message: message,
   });
 });
 
@@ -848,87 +482,6 @@ ipcMain.handle('get-all-yields', async () => {
       else resolve(rows);
     });
   });
-});
-
-ipcMain.handle('get-inventory', async () => {
-  return new Promise((resolve, reject) => {
-    db.all('SELECT * FROM inventory WHERE is_deleted = 0 ORDER BY material ASC, quality DESC', (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows || []);
-    });
-  });
-});
-
-ipcMain.handle('transfer-to-inventory', async (event, { yieldId, location }) => {
-  const now = new Date().toISOString();
-  return new Promise((resolve, reject) => {
-    db.get('SELECT * FROM yields WHERE id = ?', [yieldId], (err, row) => {
-      if (err || !row) {
-        reject(err || new Error('Yield not found'));
-        return;
-      }
-
-      db.serialize(() => {
-        db.run('UPDATE yields SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, yieldId]);
-        const uuid = crypto.randomUUID();
-        db.run(
-          'INSERT INTO inventory (uuid, material, quality, quantity, location, updated_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [uuid, row.material, row.quality, row.yield_cscu, location, now, 0],
-          (err) => {
-            if (err) reject(err);
-            else {
-              broadcastSync();
-              resolve(true);
-            }
-          }
-        );
-      });
-    });
-  });
-});
-
-ipcMain.handle('update-inventory', async (event, { id, quantity, location }) => {
-  const now = new Date().toISOString();
-  return new Promise((resolve, reject) => {
-    db.run(
-      'UPDATE inventory SET quantity = ?, location = ?, updated_at = ? WHERE id = ?',
-      [quantity, location, now, id],
-      (err) => {
-        if (err) reject(err);
-        else {
-          broadcastSync();
-          resolve(true);
-        }
-      }
-    );
-  });
-});
-
-ipcMain.handle('delete-inventory', async (event, id) => {
-  const now = new Date().toISOString();
-  return new Promise((resolve, reject) => {
-    db.run('UPDATE inventory SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, id], (err) => {
-      if (err) reject(err);
-      else {
-        broadcastSync();
-        resolve(true);
-      }
-    });
-  });
-});
-
-ipcMain.handle('save-csv', async (event, csvContent) => {
-  const { filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Export to CSV',
-    defaultPath: path.join(app.getPath('documents'), 'ore_yields.csv'),
-    filters: [{ name: 'CSV Files', extensions: ['csv'] }]
-  });
-
-  if (filePath) {
-    fs.writeFileSync(filePath, csvContent);
-    return true;
-  }
-  return false;
 });
 
 ipcMain.handle('add-order', async (event, order) => {
@@ -993,3 +546,7 @@ ipcMain.handle('get-order-details', async (event, orderUuid) => {
     });
   });
 });
+
+module.exports = {
+  setMainWindow
+};

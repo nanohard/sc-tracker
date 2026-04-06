@@ -1,9 +1,10 @@
 const Tesseract = require('tesseract.js');
 const { Jimp } = require('jimp');
 const fs = require('fs');
+const path = require('path');
 
-const testImage = 'test2.png';
-const tempPath = 'test2_processed.png';
+const testImage = path.join(__dirname, '../test2.png');
+const tempPath = path.join(__dirname, '../test2_processed.png');
 
 /**
  * STAR CITIZEN MINER TRACKER - OCR REGRESSION TEST

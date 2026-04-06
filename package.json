@@ -2,7 +2,7 @@
   "name": "sc-tracker",
   "version": "3.0.0",
   "description": "Star Citizen Tracker",
-  "main": "main.js",
+  "main": "src/main.js",
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder",
@@ -17,11 +17,11 @@
       "signAndEditExecutable": false
     },
     "files": [
-      "main.js",
-      "renderer.js",
-      "database.js",
+      "src/**/*",
       "index.html",
-      "package.json"
+      "package.json",
+      "icon.ico",
+      "eng.traineddata"
     ],
     "directories": {
       "output": "dist"
