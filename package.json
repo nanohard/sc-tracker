@@ -1,6 +1,6 @@
 {
   "name": "sc-tracker",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Star Citizen Tracker",
   "main": "src/main.js",
   "scripts": {

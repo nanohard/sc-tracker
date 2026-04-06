@@ -190,16 +190,55 @@ async function loadSyncSettings() {
             div.style.borderRadius = '4px';
             
             div.innerHTML = `
-                <div style="display: flex; flex-direction: column;">
+                <div style="display: flex; flex-direction: column; flex-grow: 1;">
                     ${nickname ? `<span style="font-weight: bold; color: #00d2ff;">${nickname}</span>` : ''}
-                    <span style="font-family: monospace; font-size: 0.9em; color: #aaa;">${uuid}</span>
+                    <span style="font-family: monospace; font-size: 0.8em; color: #aaa; margin-bottom: 5px;">${uuid}</span>
+                    <div style="display: flex; flex-direction: column; gap: 5px; margin-top: 5px;">
+                        <div style="display: flex; align-items: center; gap: 15px; font-size: 0.85em;">
+                            <span style="width: 70px; color: #888;">Mining:</span>
+                            <label style="cursor: pointer; display: flex; align-items: center;">
+                                <input type="checkbox" class="allow-mining-check" ${peer.mining?.allowPull !== false ? 'checked' : ''} style="margin: 0; margin-right: 2px; width: auto; height: auto; padding: 0;">Authorize
+                            </label>
+                            <label style="cursor: pointer; display: flex; align-items: center;">
+                                <input type="checkbox" class="follow-mining-check" ${peer.mining?.requestPull !== false ? 'checked' : ''} style="margin: 0; margin-right: 2px; width: auto; height: auto; padding: 0;">Follow
+                            </label>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 15px; font-size: 0.85em;">
+                            <span style="width: 70px; color: #888;">Inventory:</span>
+                            <label style="cursor: pointer; display: flex; align-items: center;">
+                                <input type="checkbox" class="allow-inventory-check" ${peer.inventory?.allowPull !== false ? 'checked' : ''} style="margin: 0; margin-right: 2px; width: auto; height: auto; padding: 0;">Authorize
+                            </label>
+                            <label style="cursor: pointer; display: flex; align-items: center;">
+                                <input type="checkbox" class="follow-inventory-check" ${peer.inventory?.requestPull !== false ? 'checked' : ''} style="margin: 0; margin-right: 2px; width: auto; height: auto; padding: 0;">Follow
+                            </label>
+                        </div>
+                    </div>
                 </div>
-                <button class="secondary delete-btn" style="margin: 0; padding: 2px 8px; font-size: 0.8em;">Remove</button>
+                <button class="secondary delete-btn" style="margin-left: 10px; padding: 2px 8px; font-size: 0.8em;">Remove</button>
             `;
             
+            div.querySelector('.allow-mining-check').addEventListener('change', async (e) => {
+                await ipcRenderer.invoke('update-peer-permission', uuid, 'mining', 'allowPull', e.target.checked);
+            });
+
+            div.querySelector('.follow-mining-check').addEventListener('change', async (e) => {
+                await ipcRenderer.invoke('update-peer-permission', uuid, 'mining', 'requestPull', e.target.checked);
+            });
+
+            div.querySelector('.allow-inventory-check').addEventListener('change', async (e) => {
+                await ipcRenderer.invoke('update-peer-permission', uuid, 'inventory', 'allowPull', e.target.checked);
+            });
+
+            div.querySelector('.follow-inventory-check').addEventListener('change', async (e) => {
+                await ipcRenderer.invoke('update-peer-permission', uuid, 'inventory', 'requestPull', e.target.checked);
+            });
+
             div.querySelector('.delete-btn').addEventListener('click', async () => {
-                await ipcRenderer.invoke('remove-peer-uuid', uuid);
-                loadSyncSettings();
+                const confirmed = await ipcRenderer.invoke('show-confirm-dialog', `Remove peer ${nickname || uuid}?`);
+                if (confirmed) {
+                    await ipcRenderer.invoke('remove-peer-uuid', uuid);
+                    loadSyncSettings();
+                }
             });
             
             peerListDiv.appendChild(div);
@@ -255,7 +294,7 @@ addPeerBtn.addEventListener('click', async () => {
         peerNicknameInput.value = '';
         loadSyncSettings();
     } else {
-        alert('Peer already exists or invalid UUID.');
+        await ipcRenderer.invoke('show-alert-dialog', 'Peer already exists or invalid UUID.');
     }
 });
 

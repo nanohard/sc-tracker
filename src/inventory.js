@@ -45,7 +45,8 @@ ipcMain.handle('transfer-to-inventory', async (event, { yieldId, location }) => 
           (err) => {
             if (err) reject(err);
             else {
-              broadcastSync();
+              broadcastSync('mining');
+              broadcastSync('inventory');
               resolve(true);
             }
           }
@@ -64,7 +65,7 @@ ipcMain.handle('update-inventory', async (event, { id, quantity, location }) => 
       (err) => {
         if (err) reject(err);
         else {
-          broadcastSync();
+          broadcastSync('inventory');
           resolve(true);
         }
       }
@@ -78,7 +79,7 @@ ipcMain.handle('delete-inventory', async (event, id) => {
     db.run('UPDATE inventory SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, id], (err) => {
       if (err) reject(err);
       else {
-        broadcastSync();
+        broadcastSync('inventory');
         resolve(true);
       }
     });

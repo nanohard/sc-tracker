@@ -160,7 +160,7 @@ async function processOrdersForYield(material, quality, yield_cscu, miner_name) 
         }
 
         Promise.all(updatePromises).then(() => {
-          if (updatePromises.length > 0) broadcastSync();
+          if (updatePromises.length > 0) broadcastSync('mining');
           resolve();
         });
       }
@@ -210,7 +210,7 @@ ipcMain.handle('save-yield', async (event, yieldData) => {
         if (err) {
           reject(err);
         } else {
-          broadcastSync();
+          broadcastSync('mining');
           resolve({ id: this.lastID, updated: this.changes === 0 });
         }
       });
@@ -272,7 +272,7 @@ ipcMain.handle('update-yield', async (event, yieldData) => {
       }
     });
   });
-  broadcastSync();
+  broadcastSync('mining');
   return result;
 });
 
@@ -284,7 +284,7 @@ ipcMain.handle('delete-yield', async (event, id) => {
       else resolve(true);
     });
   });
-  broadcastSync();
+  broadcastSync('mining');
   return result;
 });
 
@@ -313,7 +313,7 @@ ipcMain.handle('add-miner', async (event, name) => {
       }
     });
   });
-  broadcastSync();
+  broadcastSync('mining');
   return result;
 });
 
@@ -332,7 +332,7 @@ ipcMain.handle('update-miner', async (event, { id, name }) => {
       }
     });
   });
-  broadcastSync();
+  broadcastSync('mining');
   return result;
 });
 
@@ -344,7 +344,7 @@ ipcMain.handle('delete-miner', async (event, id) => {
       else resolve(true);
     });
   });
-  broadcastSync();
+  broadcastSync('mining');
   return result;
 });
 
@@ -420,7 +420,7 @@ ipcMain.handle('import-csv', async (event) => {
       });
     });
   });
-  broadcastSync();
+  broadcastSync('mining');
   return result;
 });
 
@@ -492,7 +492,7 @@ ipcMain.handle('add-order', async (event, order) => {
       INSERT INTO orders (uuid, material, quantity, quantity_mined, min_quality, status, created_at, updated_at, is_deleted)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [uuid, order.material, order.quantity, 0, order.min_quality, 'Pending', now, now, 0], (err) => {
-      if (!err) broadcastSync();
+      if (!err) broadcastSync('mining');
       resolve(!err);
     });
   });
@@ -510,7 +510,7 @@ ipcMain.handle('delete-order', async (event, uuid) => {
   const now = new Date().toISOString();
   return new Promise(resolve => {
     db.run("UPDATE orders SET is_deleted = 1, updated_at = ? WHERE uuid = ?", [now, uuid], (err) => {
-      if (!err) broadcastSync();
+      if (!err) broadcastSync('mining');
       resolve(!err);
     });
   });
@@ -520,7 +520,7 @@ ipcMain.handle('update-order-status', async (event, { uuid, status }) => {
     const now = new Date().toISOString();
     return new Promise(resolve => {
         db.run("UPDATE orders SET status = ?, updated_at = ? WHERE uuid = ?", [status, now, uuid], (err) => {
-            if (!err) broadcastSync();
+            if (!err) broadcastSync('mining');
             resolve(!err);
         });
     });
