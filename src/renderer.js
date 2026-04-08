@@ -1,5 +1,94 @@
 const { ipcRenderer, webUtils } = require('electron');
 
+function applyPermissions() {
+    const isCEO = currentUserRole === 'CEO' || currentUserRole === 'Admin';
+    const isDirector = currentUserRole === 'Director';
+    const isMiner = currentUserRole === 'Miner';
+    const isStaff = isCEO || isDirector;
+
+    // Staff only: Member management
+    if (navMembersBtn) navMembersBtn.style.display = isStaff ? 'block' : 'none';
+    
+    // Order creation: Staff only
+    const orderCreationSection = submitOrderBtn ? (submitOrderBtn.parentElement ? submitOrderBtn.parentElement.parentElement : null) : null;
+    if (orderCreationSection) orderCreationSection.style.display = isStaff ? 'block' : 'none';
+
+    // Mining forms: Staff and Miners
+    const canMine = isStaff || isMiner;
+    if (manualEntryContainer) manualEntryContainer.style.display = canMine ? 'block' : 'none';
+    if (uploadContainer) uploadContainer.style.display = canMine ? 'block' : 'none';
+    if (minerSelectionContainer) minerSelectionContainer.style.display = canMine ? 'block' : 'none';
+
+    // Navigation: All accepted roles can see all detail pages (Members are read-only)
+    if (navOrdersBtn) navOrdersBtn.style.display = 'block';
+    if (navStatsBtn) navStatsBtn.style.display = 'block';
+    if (navOreLocationBtn) navOreLocationBtn.style.display = 'block';
+    if (dashMiningBtn) dashMiningBtn.style.display = 'block';
+    if (dashInventoryBtn) dashInventoryBtn.style.display = 'block';
+
+    // Payout, Delete, and Transfer buttons: Staff only
+    document.querySelectorAll('.btn-delete, .btn-transfer, .btn-payout').forEach(btn => {
+        btn.style.display = isStaff ? 'inline-block' : 'none';
+    });
+}
+
+// Initial setup check moved to bottom
+async function checkSetup() {
+    console.log('Checking setup status...');
+    try {
+        const status = await ipcRenderer.invoke('get-setup-status');
+        console.log('Setup status received:', status);
+        if (!status.setupCompleted) {
+            setupOverlay.style.display = 'flex';
+            setupInitial.style.display = 'block';
+        } else {
+            currentUserRole = status.userRole;
+            currentOrgUuid = status.orgUuid;
+            
+            // If they joined but aren't accepted yet
+            const members = await ipcRenderer.invoke('get-org-members');
+            const me = members.find(m => m.uuid === status.localSyncUuid);
+            if (status.userRole === 'Member' && (!me || me.status === 'Pending')) {
+                setupOverlay.style.display = 'flex';
+                setupInitial.style.display = 'none';
+                setupPending.style.display = 'block';
+                setupPendingStatus.textContent = me ? me.status : 'Pending';
+            } else {
+                setupOverlay.style.display = 'none';
+                applyPermissions();
+            }
+        }
+        loadMiners(); // Load dropdowns
+    } catch (err) {
+        console.error('Error in checkSetup:', err);
+    }
+}
+
+ipcRenderer.on('sync-complete', () => {
+    refreshCurrentView();
+});
+
+ipcRenderer.on('members-updated', () => {
+    if (viewMembersList.classList.contains('active')) {
+        loadMembers();
+    }
+});
+
+ipcRenderer.on('role-updated', (event, newRole) => {
+    currentUserRole = newRole;
+    // If promoted beyond Member, dismiss any pending overlay
+    if (newRole !== 'Member' && setupOverlay && setupOverlay.style.display !== 'none') {
+        setupOverlay.style.display = 'none';
+    }
+    applyPermissions();
+    loadMiners();
+});
+
+ipcRenderer.on('setup-accepted', () => {
+    setupOverlay.style.display = 'none';
+    applyPermissions();
+});
+
 console.log('Renderer process starting...');
 
 const fileInput = document.getElementById('file-input');
@@ -10,7 +99,6 @@ const rawTextDiv = document.getElementById('raw-text');
 const viewDashboard = document.getElementById('view-dashboard');
 const viewMiningList = document.getElementById('view-mining-list');
 const viewOreDetails = document.getElementById('view-ore-details');
-const viewMinerList = document.getElementById('view-miner-list');
 const viewStatistics = document.getElementById('view-statistics');
 const viewMinerDetails = document.getElementById('view-miner-details');
 const viewSync = document.getElementById('view-sync');
@@ -18,6 +106,24 @@ const viewOrders = document.getElementById('view-orders');
 const viewCompletedOrders = document.getElementById('view-completed-orders');
 const viewOreLocation = document.getElementById('view-ore-location');
 const viewInventory = document.getElementById('view-inventory');
+const viewMembersList = document.getElementById('view-members-list');
+
+const setupOverlay = document.getElementById('setup-overlay');
+const setupInitial = document.getElementById('setup-initial');
+const setupCreateForm = document.getElementById('setup-create-form');
+const setupJoinForm = document.getElementById('setup-join-form');
+const setupPending = document.getElementById('setup-pending');
+const setupCreateName = document.getElementById('setup-create-name');
+const setupJoinUuid = document.getElementById('setup-join-uuid');
+const setupJoinName = document.getElementById('setup-join-name');
+const pendingMembersBody = document.getElementById('pending-members-body');
+const membersBody = document.getElementById('members-body');
+const pendingRequestsSection = document.getElementById('pending-requests-section');
+const displayOrgUuid = document.getElementById('display-org-uuid');
+
+let currentUserRole = 'Member';
+let currentOrgUuid = '';
+
 const oreContainer = document.getElementById('ore-container');
 const yieldBody = document.getElementById('yield-body');
 const minerBody = document.getElementById('miner-body');
@@ -31,7 +137,7 @@ const currentOreNameHeader = document.getElementById('current-ore-name');
 const currentMinerNameHeader = document.getElementById('current-miner-name');
 const backToListBtn = document.getElementById('back-to-list');
 const backToStatsBtn = document.getElementById('back-to-stats');
-const backToMiningFromMiners = document.getElementById('back-to-mining-from-miners');
+// const backToMiningFromMiners = document.getElementById('back-to-mining-from-miners');
 const backToMiningFromStats = document.getElementById('back-to-mining-from-stats');
 const backToMiningFromOreLoc = document.getElementById('back-to-mining-from-ore-loc');
 const backToDashFromSync = document.getElementById('back-to-dash-from-sync');
@@ -40,10 +146,24 @@ const backToDashFromInventory = document.getElementById('back-to-dash-from-inven
 const backToOrdersFromCompleted = document.getElementById('back-to-orders-from-completed');
 const navDashboardBtn = document.getElementById('nav-dashboard');
 const navStatsBtn = document.getElementById('nav-stats');
-const navMinersBtn = document.getElementById('nav-miners');
+// const navMinersBtn = document.getElementById('nav-miners');
 const navOrdersBtn = document.getElementById('nav-orders');
 const navOreLocationBtn = document.getElementById('nav-ore-location');
 const navCompletedOrdersBtn = document.getElementById('nav-completed-orders');
+const navMembersBtn = document.getElementById('nav-members');
+const navResetBtn = document.getElementById('nav-reset');
+const backToDashFromMembersBtn = document.getElementById('back-to-dash-from-members');
+const setupCreateBtn = document.getElementById('setup-create-btn');
+const setupJoinBtn = document.getElementById('setup-join-btn');
+const setupCreateSubmit = document.getElementById('setup-create-submit');
+const setupCreateBack = document.getElementById('setup-create-back');
+const setupJoinSubmit = document.getElementById('setup-join-submit');
+const setupJoinBack = document.getElementById('setup-join-back');
+const setupPendingRefresh = document.getElementById('setup-pending-refresh');
+const setupPendingReset = document.getElementById('setup-pending-reset');
+const setupPendingStatus = document.getElementById('setup-pending-status');
+const copyOrgUuidBtn = document.getElementById('copy-org-uuid-btn');
+
 const viewOrderDetails = document.getElementById('view-order-details');
 const orderDetailsTitle = document.getElementById('order-details-title');
 const orderSummaryDiv = document.getElementById('order-summary');
@@ -105,6 +225,51 @@ const reviewSaveAllBtn = document.getElementById('review-save-all-btn');
 const reviewCancelBtn = document.getElementById('review-cancel-btn');
 const reviewRetryBtn = document.getElementById('review-retry-btn');
 
+// Custom Modal Elements
+const customModalOverlay = document.getElementById('custom-modal-overlay');
+const modalTitle = document.getElementById('modal-title');
+const modalMessage = document.getElementById('modal-message');
+const modalConfirmBtn = document.getElementById('modal-confirm-btn');
+const modalCancelBtnCustom = document.getElementById('modal-cancel-btn-custom');
+
+let modalPromiseResolve = null;
+
+function showModal(message, type = 'alert', title = 'Alert') {
+    return new Promise((resolve) => {
+        modalTitle.textContent = title;
+        modalMessage.textContent = message;
+        
+        if (type === 'confirm') {
+            modalConfirmBtn.textContent = 'Yes';
+            modalCancelBtnCustom.style.display = 'block';
+            modalCancelBtnCustom.textContent = 'No';
+        } else {
+            modalConfirmBtn.textContent = 'OK';
+            modalCancelBtnCustom.style.display = 'none';
+        }
+
+        customModalOverlay.style.display = 'flex';
+        modalPromiseResolve = resolve;
+        modalConfirmBtn.focus();
+    });
+}
+
+if (modalConfirmBtn) modalConfirmBtn.addEventListener('click', () => {
+    customModalOverlay.style.display = 'none';
+    if (modalPromiseResolve) {
+        modalPromiseResolve(true);
+        modalPromiseResolve = null;
+    }
+});
+
+if (modalCancelBtnCustom) modalCancelBtnCustom.addEventListener('click', () => {
+    customModalOverlay.style.display = 'none';
+    if (modalPromiseResolve) {
+        modalPromiseResolve(false);
+        modalPromiseResolve = null;
+    }
+});
+
 // Transfer Modal Elements
 const transferModal = document.getElementById('transfer-modal');
 const transferYieldId = document.getElementById('transfer-yield-id');
@@ -154,21 +319,31 @@ let currentInventorySortOrder = 'ASC';
 let lastProcessedImagePath = null;
 
 // Initialize
-loadMiners();
-loadSyncSettings();
-updateSortIndicators();
-updateStatsSortIndicators();
-updateOreSortIndicators();
-updateInventorySortIndicators();
+try {
+    loadMiners();
+    loadSyncSettings();
+    updateSortIndicators();
+    updateStatsSortIndicators();
+    updateOreSortIndicators();
+    updateInventorySortIndicators();
+} catch (err) {
+    console.error('Error during initial load:', err);
+}
 
 ipcRenderer.on('sync-complete', () => {
-    syncStatusDiv.textContent = `Last synced: ${new Date().toLocaleTimeString()}`;
+    if (syncStatusDiv) {
+        syncStatusDiv.textContent = `Last synced: ${new Date().toLocaleTimeString()}`;
+    }
     loadMiners();
 });
 
 async function loadSyncSettings() {
     const settings = await ipcRenderer.invoke('get-sync-settings');
-    localSyncUuidCode.textContent = settings.local_sync_uuid || '...';
+    if (localSyncUuidCode) {
+        localSyncUuidCode.textContent = settings.org_uuid || '...';
+    }
+    
+    if (!peerListDiv) return;
     
     const peerUuids = JSON.parse(settings.peer_uuids || '[]');
     peerListDiv.innerHTML = '';
@@ -234,7 +409,7 @@ async function loadSyncSettings() {
             });
 
             div.querySelector('.delete-btn').addEventListener('click', async () => {
-                const confirmed = await ipcRenderer.invoke('show-confirm-dialog', `Remove peer ${nickname || uuid}?`);
+                const confirmed = await showModal(`Remove peer ${nickname || uuid}?`, 'confirm', 'Confirm Removal');
                 if (confirmed) {
                     await ipcRenderer.invoke('remove-peer-uuid', uuid);
                     loadSyncSettings();
@@ -246,83 +421,220 @@ async function loadSyncSettings() {
     }
 }
 
-appTitle.addEventListener('click', () => {
+if (appTitle) appTitle.addEventListener('click', () => {
     switchView('dashboard');
 });
 
-dashMiningBtn.addEventListener('click', () => {
+if (dashMiningBtn) dashMiningBtn.addEventListener('click', () => {
     switchView('mining');
 });
 
-dashInventoryBtn.addEventListener('click', () => {
+if (dashInventoryBtn) dashInventoryBtn.addEventListener('click', () => {
     switchView('inventory');
 });
 
-navStatsBtn.addEventListener('click', () => {
+if (navStatsBtn) navStatsBtn.addEventListener('click', () => {
     switchView('statistics');
 });
 
-navOreLocationBtn.addEventListener('click', () => {
+if (navOreLocationBtn) navOreLocationBtn.addEventListener('click', () => {
     switchView('ore-location');
 });
 
-navMinersBtn.addEventListener('click', () => {
-    switchView('miners');
+// if (navMinersBtn) navMinersBtn.addEventListener('click', () => {
+//     switchView('members');
+// });
+
+if (navMembersBtn) navMembersBtn.addEventListener('click', () => {
+    switchView('members');
 });
 
-dashSyncBtn.addEventListener('click', () => {
-    switchView('sync');
-});
-
-navDashboardBtn.addEventListener('click', () => {
-    switchView('dashboard');
-});
-
-copySyncUuidBtn.addEventListener('click', () => {
-    navigator.clipboard.writeText(localSyncUuidCode.textContent);
-    copySyncUuidBtn.textContent = 'Copied!';
-    setTimeout(() => copySyncUuidBtn.textContent = 'Copy', 2000);
-});
-
-addPeerBtn.addEventListener('click', async () => {
-    const peerUuid = peerUuidInput.value.trim();
-    const nickname = peerNicknameInput.value.trim();
-    if (!peerUuid) return;
-    const added = await ipcRenderer.invoke('add-peer-uuid', peerUuid, nickname);
-    if (added) {
-        peerUuidInput.value = '';
-        peerNicknameInput.value = '';
-        loadSyncSettings();
-    } else {
-        await ipcRenderer.invoke('show-alert-dialog', 'Peer already exists or invalid UUID.');
+if (navResetBtn) navResetBtn.addEventListener('click', async () => {
+    const confirm = await showModal('Are you sure you want to RESET ALL DATA and remove yourself from this Organization? This cannot be undone and you will receive a new User UUID.', 'confirm', 'Confirm Reset');
+    if (confirm) {
+        const result = await ipcRenderer.invoke('reset-setup');
+        if (result) {
+            // Reset local state
+            currentUserRole = 'Member';
+            currentOrgUuid = '';
+            
+            // Show setup overlay
+            setupOverlay.style.display = 'flex';
+            setupInitial.style.display = 'block';
+            setupCreateForm.style.display = 'none';
+            setupJoinForm.style.display = 'none';
+            setupPending.style.display = 'none';
+            
+            // Clear any active views and go back to dashboard (behind overlay)
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            viewDashboard.classList.add('active');
+            
+            // Refresh data (should be empty now)
+            if (typeof refreshCurrentView === 'function') refreshCurrentView();
+            if (typeof loadMiners === 'function') loadMiners();
+            
+            await showModal('All data has been cleared. You can now create or join a new organization.');
+        }
     }
 });
 
-backToListBtn.addEventListener('click', () => {
-    switchView('mining');
-});
-
-backToStatsBtn.addEventListener('click', () => {
-    switchView('statistics');
-});
-
-backToMiningFromMiners.addEventListener('click', () => {
-    switchView('mining');
-});
-
-backToMiningFromStats.addEventListener('click', () => {
-    switchView('mining');
-});
-
-backToMiningFromOreLoc.addEventListener('click', () => {
-    switchView('mining');
-});
-
-backToDashFromSync.addEventListener('click', () => {
+if (backToDashFromMembersBtn) backToDashFromMembersBtn.addEventListener('click', () => {
     switchView('dashboard');
 });
 
-backToDashFromInventory.addEventListener('click', () => {
+if (setupCreateBtn) setupCreateBtn.addEventListener('click', () => {
+    setupInitial.style.display = 'none';
+    setupCreateForm.style.display = 'block';
+});
+
+if (setupJoinBtn) setupJoinBtn.addEventListener('click', () => {
+    setupInitial.style.display = 'none';
+    setupJoinForm.style.display = 'block';
+});
+
+if (setupCreateBack) setupCreateBack.addEventListener('click', () => {
+    setupCreateForm.style.display = 'none';
+    setupInitial.style.display = 'block';
+});
+
+if (setupJoinBack) setupJoinBack.addEventListener('click', () => {
+    setupJoinForm.style.display = 'none';
+    setupInitial.style.display = 'block';
+});
+
+if (setupCreateSubmit) setupCreateSubmit.addEventListener('click', async () => {
+    const name = setupCreateName ? setupCreateName.value.trim() : '';
+    if (!name) {
+        await showModal('Please enter your name.');
+        return;
+    }
+    const result = await ipcRenderer.invoke('create-org', name);
+    if (result) {
+        currentUserRole = result.userRole;
+        currentOrgUuid = result.orgUuid;
+        setupOverlay.style.display = 'none';
+        applyPermissions();
+        loadMiners();
+    }
+});
+
+if (setupJoinSubmit) setupJoinSubmit.addEventListener('click', async () => {
+    const uuid = setupJoinUuid.value.trim();
+    const name = setupJoinName.value.trim();
+    if (!uuid || !name) {
+        await showModal('Please enter both Org UUID and your name.');
+        return;
+    }
+    const result = await ipcRenderer.invoke('join-org', { uuid, name });
+    if (result) {
+        currentUserRole = result.userRole;
+        currentOrgUuid = result.orgUuid;
+        setupJoinForm.style.display = 'none';
+        setupPending.style.display = 'block';
+    }
+});
+
+if (setupPendingRefresh) setupPendingRefresh.addEventListener('click', async () => {
+    const status = await ipcRenderer.invoke('get-setup-status');
+    if (status.userRole !== 'Member' || status.orgUuid) {
+        // If role was updated by admin
+        currentUserRole = status.userRole;
+        currentOrgUuid = status.orgUuid;
+        // Check if actually accepted in members list
+        const members = await ipcRenderer.invoke('get-org-members');
+        const me = members.find(m => m.uuid === status.localSyncUuid);
+        if (me && me.status === 'Accepted') {
+            setupOverlay.style.display = 'none';
+            applyPermissions();
+        } else {
+            setupPendingStatus.textContent = me ? me.status : 'Pending';
+        }
+    }
+});
+
+if (setupPendingReset) setupPendingReset.addEventListener('click', async () => {
+    const confirm = await showModal('Are you sure you want to cancel your request and start over? This will clear your current local data and generate a new User UUID.', 'confirm', 'Confirm Cancel');
+    if (confirm) {
+        const result = await ipcRenderer.invoke('reset-setup');
+        if (result) {
+            setupPending.style.display = 'none';
+            setupInitial.style.display = 'block';
+            
+            // Clear any active views and go back to dashboard (behind overlay)
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            viewDashboard.classList.add('active');
+            
+            // Refresh data (should be empty now)
+            if (typeof refreshCurrentView === 'function') refreshCurrentView();
+            if (typeof loadMiners === 'function') loadMiners();
+        }
+    }
+});
+
+if (copyOrgUuidBtn) copyOrgUuidBtn.addEventListener('click', () => {
+    const uuidText = displayOrgUuid.textContent.replace('Org UUID: ', '');
+    navigator.clipboard.writeText(uuidText);
+    copyOrgUuidBtn.textContent = 'Copied!';
+    setTimeout(() => copyOrgUuidBtn.textContent = 'Copy Org UUID', 2000);
+});
+
+if (dashSyncBtn) dashSyncBtn.addEventListener('click', () => {
+    switchView('sync');
+});
+
+if (navDashboardBtn) navDashboardBtn.addEventListener('click', () => {
+    switchView('dashboard');
+});
+
+if (copySyncUuidBtn) {
+    copySyncUuidBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(localSyncUuidCode.textContent);
+        copySyncUuidBtn.textContent = 'Copied!';
+        setTimeout(() => copySyncUuidBtn.textContent = 'Copy Org UUID', 2000);
+    });
+}
+
+if (addPeerBtn) {
+    addPeerBtn.addEventListener('click', async () => {
+        const peerUuid = peerUuidInput.value.trim();
+        const nickname = peerNicknameInput.value.trim();
+        if (!peerUuid) return;
+        const added = await ipcRenderer.invoke('add-peer-uuid', peerUuid, nickname);
+        if (added) {
+            peerUuidInput.value = '';
+            peerNicknameInput.value = '';
+            loadSyncSettings();
+        } else {
+            await showModal('Peer already exists or invalid UUID.');
+        }
+    });
+}
+
+if (backToListBtn) backToListBtn.addEventListener('click', () => {
+    switchView('mining');
+});
+
+if (backToStatsBtn) backToStatsBtn.addEventListener('click', () => {
+    switchView('statistics');
+});
+
+// if (backToMiningFromMiners) backToMiningFromMiners.addEventListener('click', () => {
+//     switchView('mining');
+// });
+
+if (backToMiningFromStats) backToMiningFromStats.addEventListener('click', () => {
+    switchView('mining');
+});
+
+if (backToMiningFromOreLoc) backToMiningFromOreLoc.addEventListener('click', () => {
+    switchView('mining');
+});
+
+if (backToDashFromSync) backToDashFromSync.addEventListener('click', () => {
+    switchView('dashboard');
+});
+
+if (backToDashFromInventory) backToDashFromInventory.addEventListener('click', () => {
     switchView('dashboard');
 });
 
@@ -330,59 +642,59 @@ backToDashFromInventory.addEventListener('click', () => {
 //     handleSort('material');
 // });
 
-sortQualityHeader.addEventListener('click', () => {
+if (sortQualityHeader) sortQualityHeader.addEventListener('click', () => {
     handleSort('quality');
 });
 
-sortYieldHeader.addEventListener('click', () => {
+if (sortYieldHeader) sortYieldHeader.addEventListener('click', () => {
     handleSort('yield_cscu');
 });
 
-sortStatsNameHeader.addEventListener('click', () => {
+if (sortStatsNameHeader) sortStatsNameHeader.addEventListener('click', () => {
     handleStatsSort('name');
 });
 
-sortStatsQualityHeader.addEventListener('click', () => {
+if (sortStatsQualityHeader) sortStatsQualityHeader.addEventListener('click', () => {
     handleStatsSort('avg_quality');
 });
 
-sortStatsYieldHeader.addEventListener('click', () => {
+if (sortStatsYieldHeader) sortStatsYieldHeader.addEventListener('click', () => {
     handleStatsSort('total_yield');
 });
 
-sortOreMinerHeader.addEventListener('click', () => {
+if (sortOreMinerHeader) sortOreMinerHeader.addEventListener('click', () => {
     handleOreSort('miner');
 });
 
-sortOreMaterialHeader.addEventListener('click', () => {
+if (sortOreMaterialHeader) sortOreMaterialHeader.addEventListener('click', () => {
     handleOreSort('material');
 });
 
-sortOreLocationHeader.addEventListener('click', () => {
+if (sortOreLocationHeader) sortOreLocationHeader.addEventListener('click', () => {
     handleOreSort('location');
 });
 
-sortOreQualityHeader.addEventListener('click', () => {
+if (sortOreQualityHeader) sortOreQualityHeader.addEventListener('click', () => {
     handleOreSort('quality');
 });
 
-sortOreQuantityHeader.addEventListener('click', () => {
+if (sortOreQuantityHeader) sortOreQuantityHeader.addEventListener('click', () => {
     handleOreSort('quantity');
 });
 
-sortInventoryMaterialHeader.addEventListener('click', () => {
+if (sortInventoryMaterialHeader) sortInventoryMaterialHeader.addEventListener('click', () => {
     handleInventorySort('material');
 });
 
-sortInventoryQualityHeader.addEventListener('click', () => {
+if (sortInventoryQualityHeader) sortInventoryQualityHeader.addEventListener('click', () => {
     handleInventorySort('quality');
 });
 
-sortInventoryQuantityHeader.addEventListener('click', () => {
+if (sortInventoryQuantityHeader) sortInventoryQuantityHeader.addEventListener('click', () => {
     handleInventorySort('quantity');
 });
 
-sortInventoryLocationHeader.addEventListener('click', () => {
+if (sortInventoryLocationHeader) sortInventoryLocationHeader.addEventListener('click', () => {
     handleInventorySort('location');
 });
 
@@ -526,7 +838,7 @@ function updateInventorySortIndicators() {
     }
 }
 
-fileInput.addEventListener('change', (e) => {
+if (fileInput) fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) {
         let imagePath;
@@ -808,11 +1120,129 @@ async function loadLocations() {
     });
 }
 
+async function loadMembers() {
+    const members = await ipcRenderer.invoke('get-org-members');
+    const myStatus = await ipcRenderer.invoke('get-setup-status');
+    currentOrgUuid = myStatus.orgUuid;
+    currentUserRole = myStatus.userRole;
+    displayOrgUuid.textContent = `Org UUID: ${currentOrgUuid || '...'}`;
+
+    pendingMembersBody.innerHTML = '';
+    membersBody.innerHTML = '';
+    
+    let hasPending = false;
+    const isCEO = currentUserRole === 'CEO' || currentUserRole === 'Admin';
+    const isDirector = currentUserRole === 'Director';
+
+    members.forEach(member => {
+        const tr = document.createElement('tr');
+
+        if (member.status === 'Pending') {
+            hasPending = true;
+            tr.innerHTML = `
+                <td>${member.name}</td>
+                <td><code style="font-size: 0.8em;">${member.uuid}</code></td>
+                <td>
+                    ${(isCEO || isDirector) ? `
+                        <button onclick="acceptMember('${member.uuid}')">Accept</button>
+                        <button class="danger" onclick="deleteMember('${member.uuid}')">Reject</button>
+                    ` : ''}
+                </td>
+            `;
+            pendingMembersBody.appendChild(tr);
+        } else {
+            const isMe = member.uuid === myStatus.localSyncUuid;
+            const isTargetCEO = member.role === 'CEO' || member.role === 'Admin';
+            
+            let actions = '';
+            // Only CEO can assign Directors. Directors can only assign Miner/Member.
+            // Neither can manage a CEO.
+            if (!isMe && (isCEO || isDirector) && !isTargetCEO) {
+                actions = `<select onchange="updateMemberRole('${member.uuid}', this.value)" class="miner-select" style="width: 120px; margin-right: 10px;">`;
+                
+                if (isCEO) {
+                    actions += `<option value="CEO" ${member.role === 'CEO' ? 'selected' : ''}>CEO</option>`;
+                    actions += `<option value="Director" ${member.role === 'Director' ? 'selected' : ''}>Director</option>`;
+                } else if (isDirector && member.role === 'Director') {
+                    // Show but don't allow changing IF it were possible to see another director
+                    actions += `<option value="Director" selected disabled>Director</option>`;
+                }
+
+                actions += `<option value="Member" ${member.role === 'Member' ? 'selected' : ''}>Member</option>`;
+                actions += `<option value="Miner" ${member.role === 'Miner' ? 'selected' : ''}>Miner</option>`;
+                actions += `</select>`;
+                actions += `<button class="danger" onclick="deleteMember('${member.uuid}')">Remove</button>`;
+            }
+
+            tr.innerHTML = `
+                <td>${member.name} ${isMe ? '(You)' : ''}</td>
+                <td><span class="role-badge role-${member.role.toLowerCase()}">${member.role}</span></td>
+                <td><code style="font-size: 0.8em;">${member.uuid}</code></td>
+                <td>${actions}</td>
+            `;
+            membersBody.appendChild(tr);
+        }
+    });
+
+    pendingRequestsSection.style.display = (hasPending && (isCEO || isDirector)) ? 'block' : 'none';
+}
+
+window.acceptMember = async (uuid) => {
+    await ipcRenderer.invoke('accept-member', uuid);
+    loadMembers();
+};
+
+window.deleteMember = async (uuid) => {
+    const confirmed = await showModal('Are you sure?', 'confirm', 'Confirm Action');
+    if (confirmed) {
+        await ipcRenderer.invoke('delete-member', uuid);
+        loadMembers();
+    }
+};
+
+window.updateMemberRole = async (uuid, role) => {
+    if (role === 'CEO') {
+        const confirmed = await showModal('Are you sure you want to transfer CEO ownership to this member? You will lose CEO permissions and become a regular Member.', 'confirm', 'Confirm CEO Transfer');
+        if (!confirmed) {
+            loadMembers(); // Refresh to reset select
+            return;
+        }
+    }
+    const result = await ipcRenderer.invoke('update-member-role', { uuid, role });
+    if (result && role === 'CEO') {
+        // If we transferred CEO, our role changed too
+        const status = await ipcRenderer.invoke('get-setup-status');
+        currentUserRole = status.userRole;
+        applyPermissions();
+    }
+    loadMembers();
+};
+
 async function loadMiners() {
-    let miners = await ipcRenderer.invoke('get-miners');
+    let minersTableData = await ipcRenderer.invoke('get-miners');
+    const members = await ipcRenderer.invoke('get-org-members');
+    
+    // Combine miners table names and members with mining-related roles
+    const minerNames = new Set();
+    const isStaff = currentUserRole === 'CEO' || currentUserRole === 'Admin' || currentUserRole === 'Director';
+    
+    minersTableData.forEach(m => {
+        if (!m.is_deleted) {
+            minerNames.add(m.name);
+        }
+    });
+
+    members.forEach(member => {
+        if (member.status === 'Accepted' && (member.role === 'Miner' || member.role === 'Director' || member.role === 'Admin' || member.role === 'CEO')) {
+            minerNames.add(member.name);
+        }
+    });
+
+    // Create unique miner list for dropdowns
+    const dropdownMiners = Array.from(minerNames).map(name => ({ name }));
     
     // Sort so "None" is at the end
-    miners.sort((a, b) => {
+    dropdownMiners.sort((a, b) => {
         if (a.name === 'None') return 1;
         if (b.name === 'None') return -1;
         return a.name.localeCompare(b.name);
@@ -827,7 +1257,7 @@ async function loadMiners() {
         }
         let currentValue = select.value;
         select.innerHTML = '<option value="">Select a Miner...</option>';
-        miners.forEach(miner => {
+        dropdownMiners.forEach(miner => {
             const option = document.createElement('option');
             option.value = miner.name;
             option.textContent = miner.name;
@@ -840,9 +1270,10 @@ async function loadMiners() {
         }
     });
 
-    // Update miner management list
+    // Update miner management list (This still only shows the manually added miners table for management)
     minerBody.innerHTML = '';
-    miners.forEach(miner => {
+    minersTableData.forEach(miner => {
+        if (miner.is_deleted) return;
         const tr = document.createElement('tr');
         const isNoneMiner = miner.name === 'None';
         tr.innerHTML = `
@@ -858,23 +1289,25 @@ async function loadMiners() {
     });
 }
 
-addMinerBtn.addEventListener('click', async () => {
-    const name = newMinerNameInput.value.trim();
-    if (!name) {
-        minerStatus.textContent = 'Error: Miner name cannot be empty.';
-        return;
-    }
-    try {
-        await ipcRenderer.invoke('add-miner', name);
-        newMinerNameInput.value = '';
-        newMinerNameInput.focus();
-        minerStatus.textContent = 'Miner added successfully.';
-        await loadMiners();
-        setTimeout(() => minerStatus.textContent = '', 3000);
-    } catch (err) {
-        minerStatus.textContent = 'Error: ' + err.message;
-    }
-});
+if (addMinerBtn) {
+    addMinerBtn.addEventListener('click', async () => {
+        const name = newMinerNameInput.value.trim();
+        if (!name) {
+            minerStatus.textContent = 'Error: Miner name cannot be empty.';
+            return;
+        }
+        try {
+            await ipcRenderer.invoke('add-miner', name);
+            newMinerNameInput.value = '';
+            newMinerNameInput.focus();
+            minerStatus.textContent = 'Miner added successfully.';
+            await loadMiners();
+            setTimeout(() => minerStatus.textContent = '', 3000);
+        } catch (err) {
+            minerStatus.textContent = 'Error: ' + err.message;
+        }
+    });
+}
 
 window.openMinerEditModal = (id, name) => {
     editMinerId.value = id;
@@ -882,31 +1315,35 @@ window.openMinerEditModal = (id, name) => {
     minerEditModal.style.display = 'block';
 };
 
-minerModalCancelBtn.onclick = () => {
-    minerEditModal.style.display = 'none';
-};
-
-minerModalSaveBtn.onclick = async () => {
-    const id = parseInt(editMinerId.value);
-    const newName = editMinerNameInput.value.trim();
-    if (!newName) {
-        await ipcRenderer.invoke('show-alert-dialog', 'Miner name cannot be empty.');
-        return;
-    }
-    try {
-        await ipcRenderer.invoke('update-miner', { id, name: newName });
+if (minerModalCancelBtn) {
+    minerModalCancelBtn.onclick = () => {
         minerEditModal.style.display = 'none';
-        minerStatus.textContent = 'Miner updated successfully.';
-        await loadMiners();
-        setTimeout(() => minerStatus.textContent = '', 3000);
-    } catch (err) {
-        await ipcRenderer.invoke('show-alert-dialog', 'Error: ' + err.message);
-    }
-};
+    };
+}
+
+if (minerModalSaveBtn) {
+    minerModalSaveBtn.onclick = async () => {
+        const id = parseInt(editMinerId.value);
+        const newName = editMinerNameInput.value.trim();
+        if (!newName) {
+            await showModal('Miner name cannot be empty.');
+            return;
+        }
+        try {
+            await ipcRenderer.invoke('update-miner', { id, name: newName });
+            minerEditModal.style.display = 'none';
+            minerStatus.textContent = 'Miner updated successfully.';
+            await loadMiners();
+            setTimeout(() => minerStatus.textContent = '', 3000);
+        } catch (err) {
+            await showModal('Error: ' + err.message);
+        }
+    };
+}
 
 
 window.deleteMiner = async (id) => {
-    const confirmed = await ipcRenderer.invoke('show-confirm-dialog', 'Are you sure you want to delete this miner?');
+    const confirmed = await showModal('Are you sure you want to delete this miner?', 'confirm', 'Delete Miner');
     if (confirmed) {
         await ipcRenderer.invoke('delete-miner', id);
         await loadMiners();
@@ -932,13 +1369,19 @@ async function loadLocationDetails(location) {
         const displayQuality = Math.round(qVal).toString().padStart(3, '0');
         const displayYield = Math.round(yVal).toString();
         
+        const isCEO = currentUserRole === 'CEO' || currentUserRole === 'Admin';
+        const isDirector = currentUserRole === 'Director';
+        const isStaff = isCEO || isDirector;
+        
         tr.innerHTML = `
             <td>${row.material}</td>
             <td>${displayQuality}</td>
             <td>${displayYield}</td>
             <td>
-                <button onclick="openEditModal(${row.id}, '${row.material.replace(/'/g, "\\'")}', ${row.quality}, ${row.yield_cscu}, '${row.miner_name}', '${location.replace(/'/g, "\\'")}', true)">Edit</button>
-                <button class="danger" onclick="deleteYield(${row.id})">Delete</button>
+                ${isStaff ? `
+                    <button onclick="openEditModal(${row.id}, '${row.material.replace(/'/g, "\\'")}', ${row.quality}, ${row.yield_cscu}, '${row.miner_name}', '${location.replace(/'/g, "\\'")}', true)">Edit</button>
+                    <button class="danger" onclick="deleteYield(${row.id})">Delete</button>
+                ` : '<span style="color: #888; font-style: italic;">View Only</span>'}
             </td>
         `;
         yieldBody.appendChild(tr);
@@ -949,7 +1392,6 @@ function switchView(view) {
     viewDashboard.classList.remove('active');
     viewMiningList.classList.remove('active');
     viewOreDetails.classList.remove('active');
-    viewMinerList.classList.remove('active');
     viewStatistics.classList.remove('active');
     viewMinerDetails.classList.remove('active');
     viewSync.classList.remove('active');
@@ -958,15 +1400,15 @@ function switchView(view) {
     viewOrderDetails.classList.remove('active');
     viewOreLocation.classList.remove('active');
     viewInventory.classList.remove('active');
+    viewMembersList.classList.remove('active');
 
     if (view === 'dashboard') {
         viewDashboard.classList.add('active');
     } else if (view === 'mining') {
         viewMiningList.classList.add('active');
-        // No longer calling loadLocations() as ore-container was removed
     } else if (view === 'miners') {
-        viewMinerList.classList.add('active');
-        loadMiners();
+        viewMembersList.classList.add('active');
+        loadMembers();
     } else if (view === 'statistics') {
         viewStatistics.classList.add('active');
         loadMinerStats();
@@ -989,6 +1431,9 @@ function switchView(view) {
         loadCompletedOrders();
     } else if (view === 'order-details') {
         viewOrderDetails.classList.add('active');
+    } else if (view === 'members') {
+        viewMembersList.classList.add('active');
+        loadMembers();
     } else {
         viewOreDetails.classList.add('active');
     }
@@ -1003,8 +1448,8 @@ async function refreshCurrentView() {
         await loadOreLocations();
     } else if (viewMinerDetails.classList.contains('active')) {
         await loadMinerDetails(currentMinerNameHeader.textContent);
-    } else if (viewMinerList.classList.contains('active')) {
-        await loadMiners();
+    } else if (viewMembersList.classList.contains('active')) {
+        await loadMembers();
     } else if (viewSync.classList.contains('active')) {
         await loadSyncSettings();
     } else if (viewOrders.classList.contains('active')) {
@@ -1021,7 +1466,7 @@ async function refreshCurrentView() {
 }
 
 window.deleteYield = async (id) => {
-    const confirmed = await ipcRenderer.invoke('show-confirm-dialog', 'Are you sure you want to delete this record?');
+    const confirmed = await showModal('Are you sure you want to delete this record?', 'confirm', 'Delete Record');
     if (confirmed) {
         await ipcRenderer.invoke('delete-yield', id);
         await refreshCurrentView();
@@ -1101,7 +1546,7 @@ modalSaveBtn.onclick = async () => {
         const location = editLocation.value.trim() || 'Unknown';
         
         if (isNaN(quantity) || quantity < 0) {
-            await ipcRenderer.invoke('show-alert-dialog', 'Quantity must be a positive number.');
+            await showModal('Quantity must be a positive number.');
             return;
         }
         
@@ -1118,7 +1563,7 @@ modalSaveBtn.onclick = async () => {
     if (isQuantityOnly) {
         miner_name = 'Aggregated';
     } else if (!miner_name) {
-        await ipcRenderer.invoke('show-alert-dialog', 'Please select a miner.');
+        await showModal('Please select a miner.');
         return;
     }
 
@@ -1136,7 +1581,7 @@ modalSaveBtn.onclick = async () => {
     editModal.style.display = 'none';
 };
 
-manualAddBtn.addEventListener('click', async () => {
+if (manualAddBtn) manualAddBtn.addEventListener('click', async () => {
     console.log('Add Entry button clicked!');
     manualStatus.textContent = 'Processing...';
     
@@ -1280,7 +1725,7 @@ reviewSaveAllBtn.onclick = async () => {
     for (const row of rows) {
         const miner_name = row.querySelector('.review-miner').value;
         if (!miner_name) {
-            await ipcRenderer.invoke('show-alert-dialog', 'Please select a miner for all entries before saving.');
+            await showModal('Please select a miner for all entries before saving.');
             return;
         }
     }
@@ -1339,6 +1784,10 @@ async function loadMinerDetails(minerName) {
         const displayYield = row.yield_cscu !== null ? Math.round(row.yield_cscu).toString() : '0';
         const timestamp = new Date(row.timestamp).toLocaleString();
         
+        const isCEO = currentUserRole === 'CEO' || currentUserRole === 'Admin';
+        const isDirector = currentUserRole === 'Director';
+        const isStaff = isCEO || isDirector;
+        
         tr.innerHTML = `
             <td>${row.material}</td>
             <td>${displayQuality}</td>
@@ -1346,8 +1795,11 @@ async function loadMinerDetails(minerName) {
             <td>${row.location || 'Unknown'}</td>
             <td>${timestamp}</td>
             <td>
-                <button onclick="openEditModal(${row.id}, '${row.material.replace(/'/g, "\\'")}', ${row.quality}, ${row.yield_cscu}, '${minerName.replace(/'/g, "\\'")}', '${(row.location || 'Unknown').replace(/'/g, "\\'")}', false)">Edit</button>
-                <button class="danger" onclick="deleteYield(${row.id})">Delete</button>
+                ${isStaff ? `
+                    <button onclick="openEditModal(${row.id}, '${row.material.replace(/'/g, "\\'")}', ${row.quality}, ${row.yield_cscu}, '${minerName.replace(/'/g, "\\'")}', '${(row.location || 'Unknown').replace(/'/g, "\\'")}', false)">Edit</button>
+                    <button class="danger" onclick="deleteYield(${row.id})">Delete</button>
+                    <button class="btn-transfer" onclick="transferToInventory(${row.id})">To Inventory</button>
+                ` : '<span style="color: #888; font-style: italic;">View Only</span>'}
             </td>
         `;
         minerDetailsBody.appendChild(tr);
@@ -1403,6 +1855,10 @@ async function loadOreLocations() {
         const displayQuality = row.quality !== null ? Math.round(row.quality).toString().padStart(3, '0') : '000';
         const timestamp = new Date(row.timestamp).toLocaleString();
         
+        const isCEO = currentUserRole === 'CEO' || currentUserRole === 'Admin';
+        const isDirector = currentUserRole === 'Director';
+        const isStaff = isCEO || isDirector;
+        
         tr.innerHTML = `
             <td>${row.miner_name}</td>
             <td>${row.material}</td>
@@ -1411,34 +1867,34 @@ async function loadOreLocations() {
             <td>${Math.round(row.yield_cscu)}</td>
             <td>${timestamp}</td>
             <td>
-                <button onclick="transferToInventory(${row.id})">Transfer to Inventory</button>
+                ${isStaff ? `<button onclick="transferToInventory(${row.id})">Transfer to Inventory</button>` : '<span style="color: #888; font-style: italic;">View Only</span>'}
             </td>
         `;
         oreLocationBody.appendChild(tr);
     });
 }
 
-navOrdersBtn.addEventListener('click', () => {
+if (navOrdersBtn) navOrdersBtn.addEventListener('click', () => {
     switchView('orders');
 });
 
-backToMiningFromOrders.addEventListener('click', () => {
+if (backToMiningFromOrders) backToMiningFromOrders.addEventListener('click', () => {
     switchView('mining');
 });
 
-backToOrdersFromCompleted.addEventListener('click', () => {
+if (backToOrdersFromCompleted) backToOrdersFromCompleted.addEventListener('click', () => {
     switchView('orders');
 });
 
-backToOrdersFromDetailsBtn.addEventListener('click', () => {
+if (backToOrdersFromDetailsBtn) backToOrdersFromDetailsBtn.addEventListener('click', () => {
     switchView('orders');
 });
 
-navCompletedOrdersBtn.addEventListener('click', () => {
+if (navCompletedOrdersBtn) navCompletedOrdersBtn.addEventListener('click', () => {
     switchView('completed-orders');
 });
 
-submitOrderBtn.addEventListener('click', async () => {
+if (submitOrderBtn) submitOrderBtn.addEventListener('click', async () => {
     const material = orderOreInput.value.trim();
     const quantity = parseFloat(orderQuantityInput.value);
     const min_quality = parseFloat(orderQualitySelect.value);
@@ -1475,6 +1931,10 @@ async function loadOrders() {
         return;
     }
 
+    const isCEO = currentUserRole === 'CEO' || currentUserRole === 'Admin';
+    const isDirector = currentUserRole === 'Director';
+    const isStaff = isCEO || isDirector;
+    
     pendingOrders.forEach(order => {
         const tr = document.createElement('tr');
         tr.className = 'clickable-row';
@@ -1488,7 +1948,7 @@ async function loadOrders() {
             <td>${Math.round(order.quantity_mined || 0)}</td>
             <td>${Math.round(order.min_quality)}</td>
             <td>
-                <button class="danger" onclick="event.stopPropagation(); deleteOrder('${order.uuid}')">Delete</button>
+                ${isStaff ? `<button class="danger" onclick="event.stopPropagation(); deleteOrder('${order.uuid}')">Delete</button>` : ''}
             </td>
         `;
         ordersBody.appendChild(tr);
@@ -1507,6 +1967,10 @@ async function loadCompletedOrders() {
         return;
     }
 
+    const isCEO = currentUserRole === 'CEO' || currentUserRole === 'Admin';
+    const isDirector = currentUserRole === 'Director';
+    const isStaff = isCEO || isDirector;
+
     completedOrders.forEach(order => {
         const tr = document.createElement('tr');
         tr.className = 'clickable-row';
@@ -1520,7 +1984,7 @@ async function loadCompletedOrders() {
             <td>${Math.round(order.quantity_mined || 0)}</td>
             <td>${Math.round(order.min_quality)}</td>
             <td>
-                <button class="danger" onclick="event.stopPropagation(); deleteOrder('${order.uuid}')">Delete</button>
+                ${isStaff ? `<button class="danger" onclick="event.stopPropagation(); deleteOrder('${order.uuid}')">Delete</button>` : ''}
             </td>
         `;
         completedOrdersBody.appendChild(tr);
@@ -1567,7 +2031,7 @@ window.updateOrderStatus = async (uuid, status) => {
 };
 
 window.deleteOrder = async (uuid) => {
-    const confirmed = await ipcRenderer.invoke('show-confirm-dialog', 'Are you sure you want to delete this order?');
+    const confirmed = await showModal('Are you sure you want to delete this order?', 'confirm', 'Delete Order');
     if (confirmed) {
         await ipcRenderer.invoke('delete-order', uuid);
         await refreshCurrentView();
@@ -1586,6 +2050,10 @@ async function loadInventory() {
         return;
     }
 
+    const isCEO = currentUserRole === 'CEO' || currentUserRole === 'Admin';
+    const isDirector = currentUserRole === 'Director';
+    const isStaff = isCEO || isDirector;
+    
     inventory.forEach(item => {
         const tr = document.createElement('tr');
         const displayQuality = item.quality !== null ? Math.round(item.quality).toString().padStart(3, '0') : '000';
@@ -1598,8 +2066,10 @@ async function loadInventory() {
             <td>${displayQuantity}</td>
             <td>${displayLocation}</td>
             <td>
-                <button class="secondary" onclick="openInventoryEditModal(${item.id}, '${item.material.replace(/'/g, "\\'")}', ${item.quality}, ${item.quantity}, '${(item.location || 'Unknown').replace(/'/g, "\\'")}')">Edit</button>
-                <button class="danger" onclick="deleteInventory(${item.id})">Remove</button>
+                ${isStaff ? `
+                    <button class="secondary" onclick="openInventoryEditModal(${item.id}, '${item.material.replace(/'/g, "\\'")}', ${item.quality}, ${item.quantity}, '${(item.location || 'Unknown').replace(/'/g, "\\'")}')">Edit</button>
+                    <button class="danger" onclick="deleteInventory(${item.id})">Remove</button>
+                ` : '<span style="color: #888; font-style: italic;">View Only</span>'}
             </td>
         `;
         inventoryBody.appendChild(tr);
@@ -1618,7 +2088,7 @@ transferConfirmBtn.onclick = async () => {
     const location = transferLocationInput.value.trim();
     
     if (!location) {
-        await ipcRenderer.invoke('show-alert-dialog', 'Please enter or select a location.');
+        await showModal('Please enter or select a location.');
         return;
     }
 
@@ -1627,7 +2097,7 @@ transferConfirmBtn.onclick = async () => {
         transferModal.style.display = 'none';
         await refreshCurrentView();
     } catch (err) {
-        await ipcRenderer.invoke('show-alert-dialog', 'Error transferring to inventory: ' + err.message);
+        await showModal('Error transferring to inventory: ' + err.message);
     }
 };
 
@@ -1636,9 +2106,12 @@ transferCancelBtn.onclick = () => {
 };
 
 window.deleteInventory = async (id) => {
-    const confirmed = await ipcRenderer.invoke('show-confirm-dialog', 'Are you sure you want to remove this item from inventory?');
+    const confirmed = await showModal('Are you sure you want to remove this item from inventory?', 'confirm', 'Delete Inventory Item');
     if (confirmed) {
         await ipcRenderer.invoke('delete-inventory', id);
         await loadInventory();
     }
 };
+
+checkSetup();
+console.log('Renderer setup complete.');

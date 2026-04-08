@@ -21,6 +21,8 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, '../index.html'));
   
+  mainWindow.setMenu(null);
+  
   sync.setMainWindow(mainWindow);
   mining.setMainWindow(mainWindow);
 }
@@ -41,26 +43,6 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
-});
-
-ipcMain.handle('show-confirm-dialog', async (event, message) => {
-  const result = await dialog.showMessageBox(mainWindow, {
-    type: 'question',
-    buttons: ['Yes', 'No'],
-    defaultId: 1,
-    title: 'Confirm',
-    message: message,
-  });
-  return result.response === 0;
-});
-
-ipcMain.handle('show-alert-dialog', async (event, message) => {
-  await dialog.showMessageBox(mainWindow, {
-    type: 'info',
-    buttons: ['OK'],
-    title: 'Alert',
-    message: message,
-  });
 });
 
 ipcMain.handle('save-csv', async (event, csvContent) => {

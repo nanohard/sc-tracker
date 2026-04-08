@@ -1,8 +1,19 @@
 const { ipcMain } = require('electron');
 const { db } = require('./database');
-const { broadcastSync } = require('./sync');
+const { broadcastSync, getUserRole } = require('./sync');
+
+// Helper to check role
+async function checkRole(requiredRoles) {
+    const role = await getUserRole();
+    if (!requiredRoles.includes(role)) {
+        throw new Error(`Unauthorized: Role '${role}' is not allowed for this action.`);
+    }
+    return role;
+}
 
 ipcMain.handle('get-inventory', async (event, sort) => {
+    // Read access for CEO, Admin, Director, Member, and Miner
+    await checkRole(['CEO', 'Admin', 'Director', 'Member', 'Miner']);
   const column = sort?.column || 'material';
   const order = sort?.order || 'ASC';
   
@@ -28,6 +39,8 @@ ipcMain.handle('get-inventory', async (event, sort) => {
 });
 
 ipcMain.handle('transfer-to-inventory', async (event, { yieldId, location }) => {
+    // Only CEO, Admin and Director can transfer to inventory
+    await checkRole(['CEO', 'Admin', 'Director']);
   const now = new Date().toISOString();
   return new Promise((resolve, reject) => {
     db.get('SELECT * FROM yields WHERE id = ?', [yieldId], (err, row) => {
@@ -57,6 +70,8 @@ ipcMain.handle('transfer-to-inventory', async (event, { yieldId, location }) => 
 });
 
 ipcMain.handle('update-inventory', async (event, { id, quantity, location }) => {
+    // Only CEO, Admin and Director can update inventory
+    await checkRole(['CEO', 'Admin', 'Director']);
   const now = new Date().toISOString();
   return new Promise((resolve, reject) => {
     db.run(
@@ -74,6 +89,8 @@ ipcMain.handle('update-inventory', async (event, { id, quantity, location }) => 
 });
 
 ipcMain.handle('delete-inventory', async (event, id) => {
+    // Only CEO, Admin and Director can delete inventory
+    await checkRole(['CEO', 'Admin', 'Director']);
   const now = new Date().toISOString();
   return new Promise((resolve, reject) => {
     db.run('UPDATE inventory SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, id], (err) => {

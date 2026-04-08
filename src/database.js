@@ -1,8 +1,21 @@
+const fs = require('fs');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const { app } = require('electron');
 
-const dbPath = path.join(app.getPath('userData'), 'mining_yields.db');
+const oldDbPath = path.join(app.getPath('userData'), 'mining_yields.db');
+const dbPath = path.join(app.getPath('userData'), 'sctracker.db');
+
+// Migrate old database to new name if it exists
+if (fs.existsSync(oldDbPath) && !fs.existsSync(dbPath)) {
+  try {
+    fs.renameSync(oldDbPath, dbPath);
+    console.log(`Database migrated from ${oldDbPath} to ${dbPath}`);
+  } catch (err) {
+    console.error("Error migrating database file:", err);
+  }
+}
+
 const db = new sqlite3.Database(dbPath);
 
 const initPromise = new Promise((resolve, reject) => {
@@ -122,35 +135,36 @@ const initPromise = new Promise((resolve, reject) => {
       createMinersTable();
       createOrdersTable();
       createOrderContributionsTable();
-      createSyncSettingsTable();
-      // Check schema for inventory table
-    db.all("PRAGMA table_info(inventory)", (err, rows) => {
-      if (err) {
-        console.error("Error checking inventory table info:", err);
-        return;
-      }
-      if (rows && rows.length > 0) {
-        const hasLocation = rows.some(r => r.name === 'location');
-        if (!hasLocation) {
-          console.log("Adding location column to inventory table...");
-          db.run("ALTER TABLE inventory ADD COLUMN location TEXT DEFAULT 'Unknown'");
-        }
-      }
-    });
-
-    createInventoryTable();
-    ensureNoneMinerExists(() => {
-      checkDone();
+      createSyncSettingsTable(() => {
+        // Check schema for inventory table
+        db.all("PRAGMA table_info(inventory)", (err, rows) => {
+          if (rows && rows.length > 0) {
+            const hasLocation = rows.some(r => r.name === 'location');
+            if (!hasLocation) {
+              console.log("Adding location column to inventory table...");
+              db.run("ALTER TABLE inventory ADD COLUMN location TEXT DEFAULT 'Unknown'");
+            }
+          }
+          createInventoryTable();
+          createOrgMembersTable();
+          ensureNoneMinerExists(() => {
+            checkDone();
+          });
+        });
+      });
     });
   });
 });
-});
 
 function ensureNoneMinerExists(callback) {
-  db.get("SELECT id FROM miners WHERE name = 'None'", (err, row) => {
+  db.get("SELECT id, is_deleted FROM miners WHERE name = 'None'", (err, row) => {
     if (!row) {
       const uuidSql = "lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))";
       db.run(`INSERT INTO miners (name, uuid, updated_at) VALUES ('None', ${uuidSql}, CURRENT_TIMESTAMP)`, () => {
+        if (callback) callback();
+      });
+    } else if (row.is_deleted) {
+      db.run("UPDATE miners SET is_deleted = 0 WHERE name = 'None'", () => {
         if (callback) callback();
       });
     } else {
@@ -242,34 +256,35 @@ function createOrderContributionsTable() {
   )`);
 }
 
-function createSyncSettingsTable() {
-  db.run(`CREATE TABLE IF NOT EXISTS sync_settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  )`, (err) => {
-    if (!err) {
-      // Initialize local Sync UUID if not exists
-      db.get("SELECT value FROM sync_settings WHERE key = 'local_sync_uuid'", (err, row) => {
-        if (!row) {
-          // Generate a UUID using SQLite's randomblob for reliability
-          const uuidSql = "lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))";
-          db.run(`INSERT INTO sync_settings (key, value) VALUES ('local_sync_uuid', ${uuidSql})`);
-        }
-      });
-      // Ensure peer_uuids entry exists
-      db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
-        if (!row) {
-          db.run("INSERT INTO sync_settings (key, value) VALUES ('peer_uuids', '[]')");
-        }
-      });
-      // Ensure last_sync_time entry exists
-      db.get("SELECT value FROM sync_settings WHERE key = 'last_sync_time'", (err, row) => {
-        if (!row) {
-          db.run("INSERT INTO sync_settings (key, value) VALUES ('last_sync_time', '0')");
-        }
-      });
-    }
+function createSyncSettingsTable(callback) {
+  const uuidSql = "lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))";
+  
+  db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS sync_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    )`);
+
+    db.run(`INSERT OR IGNORE INTO sync_settings (key, value) SELECT 'local_sync_uuid', ${uuidSql}`);
+    db.run("INSERT OR IGNORE INTO sync_settings (key, value) VALUES ('peer_uuids', '[]')");
+    db.run("INSERT OR IGNORE INTO sync_settings (key, value) VALUES ('last_sync_time', '0')");
+    db.run("INSERT OR IGNORE INTO sync_settings (key, value) VALUES ('org_uuid', NULL)");
+    db.run("INSERT OR IGNORE INTO sync_settings (key, value) VALUES ('user_name', NULL)");
+    db.run("INSERT OR IGNORE INTO sync_settings (key, value) VALUES ('user_role', 'Member')");
+    db.run("INSERT OR IGNORE INTO sync_settings (key, value) VALUES ('setup_completed', 'false')", () => {
+      if (callback) callback();
+    });
   });
+}
+
+function createOrgMembersTable() {
+  db.run(`CREATE TABLE IF NOT EXISTS org_members (
+    uuid TEXT PRIMARY KEY,
+    name TEXT,
+    role TEXT DEFAULT 'Member',
+    status TEXT DEFAULT 'Pending',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
 }
 
 function createInventoryTable() {

@@ -5,7 +5,7 @@ const Tesseract = require('tesseract.js');
 const { Jimp } = require('jimp');
 const crypto = require('crypto');
 const { db } = require('./database');
-const { broadcastSync } = require('./sync');
+const { broadcastSync, getUserRole } = require('./sync');
 
 let mainWindow;
 
@@ -13,8 +13,19 @@ function setMainWindow(win) {
   mainWindow = win;
 }
 
+// Helper to check role
+async function checkRole(requiredRoles) {
+    const role = await getUserRole();
+    if (!requiredRoles.includes(role)) {
+        throw new Error(`Unauthorized: Role '${role}' is not allowed for this action.`);
+    }
+    return role;
+}
+
 // OCR Processing
 ipcMain.handle('process-image', async (event, imagePath) => {
+    // CEO, Admin, Director, and Miner can process images
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner']);
   if (!imagePath) {
     throw new Error('No image path provided to OCR processor.');
   }
@@ -43,7 +54,7 @@ ipcMain.handle('process-image', async (event, imagePath) => {
     });
 
     await worker.setParameters({
-      tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .,\n',
+      tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ .,\n',
       tessedit_pageseg_mode: '6',
       preserve_interword_spaces: '1',
     });
@@ -69,6 +80,7 @@ ipcMain.handle('process-image', async (event, imagePath) => {
 
 // Database Operations
 ipcMain.handle('get-locations', async () => {
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner', 'Member']);
   return new Promise((resolve, reject) => {
     db.all('SELECT location, COUNT(DISTINCT material || "_" || quality) as count FROM yields WHERE yield_cscu > 0 AND is_deleted = 0 GROUP BY location ORDER BY location ASC', (err, rows) => {
       if (err) reject(err);
@@ -78,6 +90,7 @@ ipcMain.handle('get-locations', async () => {
 });
 
 ipcMain.handle('get-yields-by-location', async (event, { location, sortBy = 'quality', sortOrder = 'DESC' }) => {
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner', 'Member']);
   return new Promise((resolve, reject) => {
     const allowedColumns = ['quality', 'yield_cscu', 'material'];
     const allowedOrders = ['ASC', 'DESC'];
@@ -101,6 +114,7 @@ ipcMain.handle('get-yields-by-location', async (event, { location, sortBy = 'qua
 });
 
 ipcMain.handle('get-ore-locations-by-miner', async () => {
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner', 'Member']);
   return new Promise((resolve, reject) => {
     db.all(
       `SELECT id, miner_name, material, location, quality, yield_cscu, timestamp 
@@ -169,6 +183,8 @@ async function processOrdersForYield(material, quality, yield_cscu, miner_name) 
 }
 
 ipcMain.handle('save-yield', async (event, yieldData) => {
+    // CEO, Admin, Director, and Miner can save yields
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner']);
   const { material, quality, yield_cscu, miner_name, location } = yieldData;
 
   if (!miner_name || miner_name === 'Unknown') {
@@ -219,6 +235,8 @@ ipcMain.handle('save-yield', async (event, yieldData) => {
 });
 
 ipcMain.handle('update-yield', async (event, yieldData) => {
+    // Only CEO, Admin and Director can update existing yields
+    await checkRole(['CEO', 'Admin', 'Director']);
   const result = await new Promise(async (resolve, reject) => {
     const { id, material, quality, yield_cscu, miner_name, location } = yieldData;
     const actualLocation = location || 'Unknown';
@@ -277,6 +295,8 @@ ipcMain.handle('update-yield', async (event, yieldData) => {
 });
 
 ipcMain.handle('delete-yield', async (event, id) => {
+    // Only CEO, Admin and Director can delete yields
+    await checkRole(['CEO', 'Admin', 'Director']);
   const result = await new Promise((resolve, reject) => {
     const now = new Date().toISOString();
     db.run('UPDATE yields SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, id], (err) => {
@@ -289,6 +309,7 @@ ipcMain.handle('delete-yield', async (event, id) => {
 });
 
 ipcMain.handle('get-miners', async () => {
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner', 'Member']);
   return new Promise((resolve, reject) => {
     db.all('SELECT * FROM miners WHERE is_deleted = 0 ORDER BY name ASC', (err, rows) => {
       if (err) reject(err);
@@ -425,6 +446,7 @@ ipcMain.handle('import-csv', async (event) => {
 });
 
 ipcMain.handle('get-miner-stats', async (event, { sortBy = 'name', sortOrder = 'ASC' } = {}) => {
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner', 'Member']);
   return new Promise((resolve, reject) => {
     const allowedSortBy = ['name', 'avg_quality', 'total_yield'];
     const allowedOrders = ['ASC', 'DESC'];
@@ -454,6 +476,7 @@ ipcMain.handle('get-miner-stats', async (event, { sortBy = 'name', sortOrder = '
 });
 
 ipcMain.handle('get-yields-by-miner', async (event, minerName) => {
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner', 'Member']);
   return new Promise((resolve, reject) => {
     db.all(
       'SELECT id, material, quality, yield_cscu, location, timestamp FROM yields WHERE miner_name = ? AND is_deleted = 0 ORDER BY timestamp ASC',
@@ -476,6 +499,7 @@ ipcMain.handle('clear-database', async () => {
 });
 
 ipcMain.handle('get-all-yields', async () => {
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner', 'Member']);
   return new Promise((resolve, reject) => {
     db.all('SELECT location, material, quality, SUM(yield_cscu) as yield_cscu FROM yields WHERE is_deleted = 0 GROUP BY location, material, quality ORDER BY location ASC, material ASC, quality DESC', (err, rows) => {
       if (err) reject(err);
@@ -485,6 +509,8 @@ ipcMain.handle('get-all-yields', async () => {
 });
 
 ipcMain.handle('add-order', async (event, order) => {
+    // Only CEO, Admin and Director can add orders
+    await checkRole(['CEO', 'Admin', 'Director']);
   const uuid = crypto.randomUUID();
   const now = new Date().toISOString();
   return new Promise(resolve => {
@@ -499,6 +525,7 @@ ipcMain.handle('add-order', async (event, order) => {
 });
 
 ipcMain.handle('get-orders', async () => {
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner', 'Member']);
   return new Promise(resolve => {
     db.all("SELECT * FROM orders WHERE is_deleted = 0 ORDER BY created_at DESC", (err, rows) => {
       resolve(rows || []);
@@ -507,6 +534,8 @@ ipcMain.handle('get-orders', async () => {
 });
 
 ipcMain.handle('delete-order', async (event, uuid) => {
+    // Only CEO, Admin and Director can delete orders
+    await checkRole(['CEO', 'Admin', 'Director']);
   const now = new Date().toISOString();
   return new Promise(resolve => {
     db.run("UPDATE orders SET is_deleted = 1, updated_at = ? WHERE uuid = ?", [now, uuid], (err) => {
@@ -517,16 +546,19 @@ ipcMain.handle('delete-order', async (event, uuid) => {
 });
 
 ipcMain.handle('update-order-status', async (event, { uuid, status }) => {
-    const now = new Date().toISOString();
-    return new Promise(resolve => {
-        db.run("UPDATE orders SET status = ?, updated_at = ? WHERE uuid = ?", [status, now, uuid], (err) => {
-            if (!err) broadcastSync('mining');
-            resolve(!err);
-        });
+    // CEO, Admin and Director can update order status
+    await checkRole(['CEO', 'Admin', 'Director']);
+  const now = new Date().toISOString();
+  return new Promise(resolve => {
+    db.run("UPDATE orders SET status = ?, updated_at = ? WHERE uuid = ?", [status, now, uuid], (err) => {
+      if (!err) broadcastSync('mining');
+      resolve(!err);
     });
+  });
 });
 
 ipcMain.handle('get-order-details', async (event, orderUuid) => {
+    await checkRole(['CEO', 'Admin', 'Director', 'Miner', 'Member']);
   return new Promise((resolve, reject) => {
     db.serialize(() => {
       db.get("SELECT * FROM orders WHERE uuid = ?", [orderUuid], (err, order) => {
