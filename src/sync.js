@@ -10,6 +10,7 @@ let orgUuid;
 let userName;
 let userRole;
 let setupCompleted = false;
+let memberAccepted = false; // true once we are Accepted into the org (or are CEO/Director)
 let mainWindow;
 
 function setMainWindow(win) {
@@ -31,11 +32,21 @@ async function initSync() {
         userName = settings['user_name'];
         userRole = settings['user_role'] || 'Member';
         setupCompleted = settings['setup_completed'] === 'true';
-
-        if (localSyncUuid) {
-          startSwarm();
+        // CEO/Director/Admin are always accepted; others read their own org_members status
+        const isCEOorDir = userRole === 'CEO' || userRole === 'Admin' || userRole === 'Director';
+        if (isCEOorDir) {
+          memberAccepted = true;
+          if (localSyncUuid) startSwarm();
+          resolve();
+        } else if (localSyncUuid) {
+          db.get("SELECT status FROM org_members WHERE uuid = ?", [localSyncUuid], (err, row) => {
+            memberAccepted = row && row.status === 'Accepted';
+            startSwarm();
+            resolve();
+          });
+        } else {
+          resolve();
         }
-        resolve();
       });
     });
   });
@@ -86,6 +97,7 @@ ipcMain.handle('reset-setup', async () => {
   userName = null;
   userRole = 'Member';
   setupCompleted = false;
+  memberAccepted = false;
 
   console.log('Reset complete. New user UUID:', localSyncUuid);
   return true;
@@ -111,6 +123,7 @@ ipcMain.handle('create-org', async (event, name) => {
   userName = name;
   userRole = 'CEO';
   setupCompleted = true;
+  memberAccepted = true;
   if (!swarm) startSwarm();
   else broadcastHandshake();
   return { orgUuid, userRole };
@@ -317,24 +330,17 @@ async function initiateSyncWithPeer(conn, category, overrideLastSyncTime) {
   const peerInfo = await getMemberByUuid(conn.peerUuid);
 
   // RBAC Pull Logic:
-  // CEO/Director: Can pull from anyone.
-  // Member/Miner: Can only pull from CEO/Director.
+  // Any accepted member can pull from any other accepted peer (P2P model).
+  // Pending members may only pull 'members' from CEO/Director to detect acceptance.
 
-  const isCEO = userRole === 'CEO' || userRole === 'Admin';
   const isPeerCEO = conn.peerRole === 'CEO' || conn.peerRole === 'Admin';
+  const peerIsAccepted = peerInfo && peerInfo.status === 'Accepted';
 
   let canPull = false;
-  if (isCEO || userRole === 'Director') {
-      canPull = true;
-  } else {
-      if (isPeerCEO || conn.peerRole === 'Director') {
-          canPull = true;
-      }
-  }
-
-  // Exception: Everyone should sync 'members' from CEO/Director to get role updates
-  if (category === 'members' && (isPeerCEO || conn.peerRole === 'Director')) {
-      canPull = true;
+  if (memberAccepted && peerIsAccepted) {
+      canPull = true; // Both sides accepted: full P2P sync allowed
+  } else if (category === 'members' && (isPeerCEO || conn.peerRole === 'Director')) {
+      canPull = true; // Pending members can always pull member list from CEO/Director
   }
 
   if (!canPull) return;
@@ -388,14 +394,15 @@ async function handleSyncData(conn, data) {
                   initiateSyncWithPeer(conn, 'members');
               }
           } else {
-              // Update name/role if changed (and I trust them)
-              // Actually, roles should only be updated from CEO -> Members
+              // Update name/role from CEO/Director (trusted authority for role changes)
               if (!isCEO && (isPeerCEO || conn.peerRole === 'Director')) {
-                  // I am a member, I should update my local knowledge of roles from CEO/Director
                   db.run("UPDATE org_members SET role = ?, status = 'Accepted', name = ? WHERE uuid = ?", [conn.peerRole, conn.peerName, conn.peerUuid], (err) => {
                       if (!err && mainWindow) mainWindow.webContents.send('members-updated');
                   });
-                  // Re-sync all categories on reconnection to catch any missed updates
+              }
+              // Any accepted member reconnecting to an accepted peer should re-sync all
+              // categories to catch missed updates. initiateSyncWithPeer enforces RBAC.
+              if (memberAccepted) {
                   initiateSyncWithPeer(conn, 'members');
                   initiateSyncWithPeer(conn, 'mining');
                   initiateSyncWithPeer(conn, 'inventory');
@@ -411,17 +418,18 @@ async function handleSyncData(conn, data) {
       const category = message.category;
       
       // RBAC Push Logic (Response to request):
-      // CEO/Director: Serves everyone.
-      // Member/Miner: Serves CEO/Director.
-      
-      const isCEO = userRole === 'CEO' || userRole === 'Admin';
+      // Serve any peer that is Accepted in our local DB (P2P model).
+      // Also serve 'members' to anyone connecting from a CEO/Director (for pending-member acceptance checks).
+
       const isPeerCEO = conn.peerRole === 'CEO' || conn.peerRole === 'Admin';
+      const peerRecord = await getMemberByUuid(conn.peerUuid);
+      const peerIsAccepted = peerRecord && peerRecord.status === 'Accepted';
 
       let canServe = false;
-      if (isCEO || userRole === 'Director') {
-          canServe = true;
-      } else if (isPeerCEO || conn.peerRole === 'Director') {
-          canServe = true;
+      if (memberAccepted && peerIsAccepted) {
+          canServe = true; // Both accepted: serve freely
+      } else if (category === 'members' && (isPeerCEO || conn.peerRole === 'Director')) {
+          canServe = true; // Always serve member list to CEO/Director (helps pending members check status)
       }
 
       if (!canServe) return;
@@ -451,6 +459,7 @@ async function handleSyncData(conn, data) {
           }
           if (myNewInfo && myNewInfo.status === 'Accepted' && setupCompleted) {
               console.log("I HAVE BEEN ACCEPTED INTO THE ORG!");
+              memberAccepted = true;
               if (mainWindow) mainWindow.webContents.send('setup-accepted');
               broadcastHandshake(); // Inform peers we are now accepted
               // Pull ALL historical data immediately using timestamp 0, so the user sees
