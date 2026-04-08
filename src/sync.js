@@ -6,6 +6,10 @@ const { db } = require('./database');
 let swarm;
 const peers = new Set();
 let localSyncUuid;
+let orgUuid;
+let userName;
+let userRole;
+let setupCompleted = false;
 let mainWindow;
 
 function setMainWindow(win) {
@@ -15,96 +19,220 @@ function setMainWindow(win) {
 async function initSync() {
   return new Promise((resolve) => {
     db.serialize(() => {
-      db.get("SELECT value FROM sync_settings WHERE key = 'local_sync_uuid'", (err, row) => {
-        if (row) {
-          localSyncUuid = row.value;
-          startSwarm();
-          resolve();
-        } else {
-          const newUuid = crypto_node.randomUUID();
-          db.run("INSERT OR IGNORE INTO sync_settings (key, value) VALUES ('local_sync_uuid', ?)", [newUuid], () => {
-            localSyncUuid = newUuid;
-            startSwarm();
-            resolve();
-          });
+      // Get all sync settings
+      db.all("SELECT key, value FROM sync_settings", (err, rows) => {
+        const settings = {};
+        if (rows) {
+          rows.forEach(row => settings[row.key] = row.value);
         }
+
+        localSyncUuid = settings['local_sync_uuid'];
+        orgUuid = settings['org_uuid'];
+        userName = settings['user_name'];
+        userRole = settings['user_role'] || 'Member';
+        setupCompleted = settings['setup_completed'] === 'true';
+
+        if (localSyncUuid) {
+          startSwarm();
+        }
+        resolve();
       });
     });
   });
 }
 
-async function getPeerSettings() {
-  return new Promise(resolve => {
-    db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
-      if (row) {
-        try {
-          let peerSettings = JSON.parse(row.value);
-          // Migration: Convert strings to objects or add missing permissions
-          let migrated = false;
-          peerSettings = peerSettings.map(p => {
-            if (typeof p === 'string') {
-              migrated = true;
-              return { 
-                uuid: p, 
-                nickname: '', 
-                mining: { allowPull: true, requestPull: true },
-                inventory: { allowPull: true, requestPull: true }
-              };
-            }
-            if (p.allowPull !== undefined || p.requestPull !== undefined) {
-              migrated = true;
-              p.mining = { 
-                allowPull: p.allowPull ?? true, 
-                requestPull: p.requestPull ?? true 
-              };
-              p.inventory = { 
-                allowPull: p.allowPull ?? true, 
-                requestPull: p.requestPull ?? true 
-              };
-              delete p.allowPull;
-              delete p.requestPull;
-            }
-            if (!p.mining || !p.inventory) {
-              migrated = true;
-              p.mining = p.mining ?? { allowPull: true, requestPull: true };
-              p.inventory = p.inventory ?? { allowPull: true, requestPull: true };
-            }
-            return p;
-          });
-          if (migrated) {
-            db.run("UPDATE sync_settings SET value = ? WHERE key = 'peer_uuids'", [JSON.stringify(peerSettings)]);
+ipcMain.handle('reset-setup', async () => {
+  console.log('Resetting all data and organization setup...');
+  
+  // 1. Stop swarm
+  if (swarm) {
+    try {
+      await swarm.destroy();
+    } catch (e) {
+      console.error('Error destroying swarm:', e);
+    }
+    swarm = null;
+    peers.clear();
+  }
+
+  // 2. Clear data from all tables and reset sync_settings
+  const newLocalUuid = crypto_node.randomUUID();
+  
+  await new Promise((resolve, reject) => {
+    db.serialize(() => {
+      db.run("DELETE FROM yields");
+      db.run("DELETE FROM miners WHERE name != 'None'");
+      db.run("DELETE FROM orders");
+      db.run("DELETE FROM order_contributions");
+      db.run("DELETE FROM org_members");
+      db.run("DELETE FROM inventory");
+      
+      db.run("UPDATE sync_settings SET value = ? WHERE key = 'local_sync_uuid'", [newLocalUuid]);
+      db.run("UPDATE sync_settings SET value = NULL WHERE key = 'org_uuid'");
+      db.run("UPDATE sync_settings SET value = NULL WHERE key = 'user_name'");
+      db.run("UPDATE sync_settings SET value = 'Member' WHERE key = 'user_role'");
+      db.run("UPDATE sync_settings SET value = 'false' WHERE key = 'setup_completed'");
+      db.run("UPDATE sync_settings SET value = '[]' WHERE key = 'peer_uuids'");
+      db.run("UPDATE sync_settings SET value = '0' WHERE key = 'last_sync_time'", (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  });
+
+  // 3. Reset local variables
+  localSyncUuid = newLocalUuid;
+  orgUuid = null;
+  userName = null;
+  userRole = 'Member';
+  setupCompleted = false;
+
+  console.log('Reset complete. New user UUID:', localSyncUuid);
+  return true;
+});
+
+// IPC Handlers for Setup
+ipcMain.handle('get-setup-status', async () => {
+  return { setupCompleted, orgUuid, userRole, userName, localSyncUuid };
+});
+
+ipcMain.handle('create-org', async (event, name) => {
+  const newOrgUuid = crypto_node.randomUUID();
+  await new Promise(resolve => {
+    db.serialize(() => {
+      db.run("UPDATE sync_settings SET value = ? WHERE key = 'org_uuid'", [newOrgUuid]);
+      db.run("UPDATE sync_settings SET value = ? WHERE key = 'user_name'", [name]);
+      db.run("UPDATE sync_settings SET value = ? WHERE key = 'user_role'", ['CEO']);
+      db.run("UPDATE sync_settings SET value = 'true' WHERE key = 'setup_completed'");
+      db.run("INSERT OR REPLACE INTO org_members (uuid, name, role, status) VALUES (?, ?, 'CEO', 'Accepted')", [localSyncUuid, name], () => resolve());
+    });
+  });
+  orgUuid = newOrgUuid;
+  userName = name;
+  userRole = 'CEO';
+  setupCompleted = true;
+  if (!swarm) startSwarm();
+  else broadcastHandshake();
+  return { orgUuid, userRole };
+});
+
+ipcMain.handle('join-org', async (event, { uuid, name }) => {
+  await new Promise(resolve => {
+    db.serialize(() => {
+      db.run("UPDATE sync_settings SET value = ? WHERE key = 'org_uuid'", [uuid]);
+      db.run("UPDATE sync_settings SET value = ? WHERE key = 'user_name'", [name]);
+      db.run("UPDATE sync_settings SET value = ? WHERE key = 'user_role'", ['Member']);
+      db.run("UPDATE sync_settings SET value = 'true' WHERE key = 'setup_completed'");
+      db.run("INSERT OR REPLACE INTO org_members (uuid, name, role, status) VALUES (?, ?, 'Member', 'Pending')", [localSyncUuid, name], () => resolve());
+    });
+  });
+  orgUuid = uuid;
+  userName = name;
+  userRole = 'Member';
+  setupCompleted = true;
+  if (!swarm) startSwarm();
+  else broadcastHandshake();
+  return { orgUuid, userRole };
+});
+
+ipcMain.handle('get-org-members', async () => {
+  return new Promise((resolve, reject) => {
+    db.all("SELECT * FROM org_members ORDER BY name ASC", (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+});
+
+ipcMain.handle('update-member-role', async (event, { uuid, role }) => {
+  const isCEO = userRole === 'CEO' || userRole === 'Admin';
+  if (!isCEO && userRole !== 'Director') {
+    throw new Error('Unauthorized');
+  }
+
+  // Only CEO can assign Directors or transfer CEO status
+  if (!isCEO && (role === 'Director' || role === 'CEO')) {
+    throw new Error('Only the CEO can assign Directors or transfer ownership');
+  }
+
+  if (role === 'CEO') {
+    return new Promise((resolve, reject) => {
+      db.serialize(() => {
+        // 1. Update target member to CEO
+        db.run("UPDATE org_members SET role = 'CEO', updated_at = CURRENT_TIMESTAMP WHERE uuid = ?", [uuid]);
+        // 2. Update current user to Member in members table
+        db.run("UPDATE org_members SET role = 'Member', updated_at = CURRENT_TIMESTAMP WHERE uuid = ?", [localSyncUuid]);
+        // 3. Update current user's local role
+        db.run("UPDATE sync_settings SET value = 'Member' WHERE key = 'user_role'", [], (err) => {
+          if (err) {
+            reject(err);
+          } else {
+            userRole = 'Member';
+            broadcastSync('members');
+            // Notify current user's renderer that their role changed
+            // This is handled by renderer calling get-setup-status after invoke
+            resolve(true);
           }
-          resolve(peerSettings);
-        } catch (e) {
-          resolve([]);
-        }
-      } else {
-        resolve([]);
+        });
+      });
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    db.run("UPDATE org_members SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?", [role, uuid], (err) => {
+      if (err) reject(err);
+      else {
+        broadcastSync('members');
+        resolve(true);
       }
     });
   });
-}
+});
 
-async function getPeerUuids() {
-  const settings = await getPeerSettings();
-  return settings.map(p => p.uuid);
-}
+ipcMain.handle('accept-member', async (event, uuid) => {
+  const isCEO = userRole === 'CEO' || userRole === 'Admin';
+  if (!isCEO && userRole !== 'Director') {
+    throw new Error('Unauthorized');
+  }
+  return new Promise((resolve, reject) => {
+    db.run("UPDATE org_members SET status = 'Accepted', updated_at = CURRENT_TIMESTAMP WHERE uuid = ?", [uuid], (err) => {
+      if (err) reject(err);
+      else {
+        broadcastSync('members');
+        resolve(true);
+      }
+    });
+  });
+});
+
+ipcMain.handle('delete-member', async (event, uuid) => {
+  const isCEO = userRole === 'CEO' || userRole === 'Admin';
+  if (!isCEO && userRole !== 'Director') {
+    throw new Error('Unauthorized');
+  }
+  return new Promise((resolve, reject) => {
+    db.run("DELETE FROM org_members WHERE uuid = ?", [uuid], (err) => {
+      if (err) reject(err);
+      else {
+        broadcastSync('members');
+        resolve(true);
+      }
+    });
+  });
+});
 
 function startSwarm() {
   if (swarm) return;
+  if (!orgUuid) return; // Wait for org setup
   
   swarm = new hyperswarm();
   
-  db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
-    if (row) {
-      const peerUuids = JSON.parse(row.value);
-      const uuids = peerUuids.map(p => typeof p === 'string' ? p : p.uuid);
-      [localSyncUuid, ...uuids].forEach(uuid => {
-        const topic = crypto_node.createHash('sha256').update(uuid).digest();
-        swarm.join(topic, { lookup: true, announce: true });
-      });
-    }
-  });
+  // Join org-specific topic and local-uuid topic
+  const orgTopic = crypto_node.createHash('sha256').update(orgUuid).digest();
+  swarm.join(orgTopic, { lookup: true, announce: true });
+  
+  const myTopic = crypto_node.createHash('sha256').update(localSyncUuid).digest();
+  swarm.join(myTopic, { lookup: true, announce: true });
 
   swarm.on('connection', async (conn, info) => {
     console.log('New connection from peer');
@@ -114,72 +242,104 @@ function startSwarm() {
     conn.on('close', () => peers.delete(conn));
     conn.on('error', () => peers.delete(conn));
 
-    // Send initial handshake
-    const myPeerSettings = await getPeerSettings();
-    const peerUuid = info.publicKey ? info.publicKey.toString('hex') : null; // Hyperswarm uses public keys
-    
-    // We don't necessarily know the peer's UUID yet until handshake
-    // but we send our intent based on what we have stored.
-    // We'll send our full settings list and let them find us, 
-    // or just wait until we know who they are.
-    // Actually, it's better to just send our UUID and our intent for EVERYONE we know.
-    // Or better: handshake just sends our UUID. Then after we know who they are, 
-    // we send another handshake with the specific intent for them.
-    
-    conn.write(JSON.stringify({
-      type: 'handshake',
-      uuid: localSyncUuid
-    }));
+    // Send initial handshake with Org info
+    sendHandshake(conn);
   });
 
   // Periodic sync every 10 seconds
   setInterval(async () => {
-    const mySettings = await getPeerSettings();
     for (const conn of peers) {
-      if (conn.peerUuid) {
-        const setting = mySettings.find(p => p.uuid === conn.peerUuid);
-        if (setting) {
-          if (setting.mining.requestPull && conn.peerPermissions?.mining?.allowPull) {
-            initiateSyncWithPeer(conn, 'mining');
-          }
-          if (setting.inventory.requestPull && conn.peerPermissions?.inventory?.allowPull) {
-            initiateSyncWithPeer(conn, 'inventory');
-          }
+      if (conn.peerUuid && conn.orgUuid === orgUuid) {
+        // If I am CEO/Director, I can sync everything.
+        // If I am Member, I only pull from CEO/Directors.
+        // Miners can push their yields.
+        
+        const isCEO = userRole === 'CEO' || userRole === 'Admin';
+        
+        // Check if peer is accepted in my list, or if I am joining and they are CEO
+        const peerInfo = await getMemberByUuid(conn.peerUuid);
+        if (peerInfo && peerInfo.status === 'Accepted') {
+           // Standard sync logic
+           initiateSyncWithPeer(conn, 'mining');
+           initiateSyncWithPeer(conn, 'inventory');
+           initiateSyncWithPeer(conn, 'members');
+        } else if (isCEO || userRole === 'Director') {
+            // Even if not accepted, maybe sync member list to see pending?
+            // No, handshake handles pending requests.
         }
       }
     }
   }, 10000);
 }
 
+async function getMemberByUuid(uuid) {
+    return new Promise(resolve => {
+        db.get("SELECT * FROM org_members WHERE uuid = ?", [uuid], (err, row) => resolve(row));
+    });
+}
+
+function sendHandshake(conn) {
+    console.log(`Sending handshake to peer: ${conn.remoteAddress}`);
+    conn.write(JSON.stringify({
+      type: 'handshake',
+      uuid: localSyncUuid,
+      orgUuid: orgUuid,
+      name: userName,
+      role: userRole
+    }));
+}
+
+function broadcastHandshake() {
+    for (const conn of peers) {
+        sendHandshake(conn);
+    }
+}
+
 function broadcastSync(category) {
   if (peers.size === 0) return;
   const notification = JSON.stringify({ type: 'sync-notification', category });
   for (const conn of peers) {
-    if (conn.peerUuid) {
-      getPeerSettings().then(mySettings => {
-        const setting = mySettings.find(p => p.uuid === conn.peerUuid);
-        // Only notify if we allow this peer for the specific category
-        if (setting && setting[category] && setting[category].allowPull) {
-          try {
-            conn.write(notification);
-          } catch (err) {
-            console.error(`Failed to send ${category} sync notification:`, err);
-          }
+    if (conn.peerUuid && conn.orgUuid === orgUuid) {
+        // Permission check: standard members only get notifications from higher ups?
+        // For now, let notifications pass, initiateSyncWithPeer will do strict checks.
+        try {
+          conn.write(notification);
+        } catch (err) {
+          console.error(`Failed to send ${category} sync notification:`, err);
         }
-      });
     }
   }
 }
 
-async function initiateSyncWithPeer(conn, category) {
-  const mySettings = await getPeerSettings();
-  const setting = mySettings.find(p => p.uuid === conn.peerUuid);
-  
-  if (!setting || !setting[category] || !setting[category].requestPull || !conn.peerPermissions?.[category]?.allowPull) {
-    return;
+async function initiateSyncWithPeer(conn, category, overrideLastSyncTime) {
+  if (!conn.peerUuid || conn.orgUuid !== orgUuid) return;
+
+  const peerInfo = await getMemberByUuid(conn.peerUuid);
+
+  // RBAC Pull Logic:
+  // CEO/Director: Can pull from anyone.
+  // Member/Miner: Can only pull from CEO/Director.
+
+  const isCEO = userRole === 'CEO' || userRole === 'Admin';
+  const isPeerCEO = conn.peerRole === 'CEO' || conn.peerRole === 'Admin';
+
+  let canPull = false;
+  if (isCEO || userRole === 'Director') {
+      canPull = true;
+  } else {
+      if (isPeerCEO || conn.peerRole === 'Director') {
+          canPull = true;
+      }
   }
-  
-  const lastSyncTime = await new Promise(resolve => {
+
+  // Exception: Everyone should sync 'members' from CEO/Director to get role updates
+  if (category === 'members' && (isPeerCEO || conn.peerRole === 'Director')) {
+      canPull = true;
+  }
+
+  if (!canPull) return;
+
+  const lastSyncTime = overrideLastSyncTime !== undefined ? overrideLastSyncTime : await new Promise(resolve => {
     db.get("SELECT value FROM sync_settings WHERE key = 'last_sync_time'", (err, row) => {
       resolve(row ? parseInt(row.value) : 0);
     });
@@ -198,48 +358,73 @@ async function handleSyncData(conn, data) {
     
     if (message.type === 'handshake') {
       conn.peerUuid = message.uuid;
+      conn.orgUuid = message.orgUuid;
+      conn.peerName = message.name;
+      conn.peerRole = message.role;
       
-      // If the peer sent their intent, store it on the connection
-      if (message.intent) {
-        if (message.intent.mining && message.intent.inventory) {
-          conn.peerPermissions = message.intent;
-          console.log(`Received handshake from ${conn.peerUuid} with granular permissions.`);
-        } else {
-          // Legacy handshake with single-category intent
-          conn.peerPermissions = {
-            mining: { allowPull: message.intent.allowPull ?? true, requestPull: message.intent.requestPull ?? true },
-            inventory: { allowPull: message.intent.allowPull ?? true, requestPull: message.intent.requestPull ?? true }
-          };
-          console.log(`Received legacy handshake (v1 intent) from ${conn.peerUuid}.`);
-        }
-      } else {
-        // Old version or initial handshake, we need to send our intent back
-        console.log(`Received initial handshake from ${conn.peerUuid}.`);
-        broadcastHandshake();
-      }
-      
-      const mySettings = await getPeerSettings();
-      const setting = mySettings.find(p => p.uuid === conn.peerUuid);
-      if (setting) {
-        if (setting.mining.requestPull && conn.peerPermissions?.mining?.allowPull) {
-          initiateSyncWithPeer(conn, 'mining');
-        }
-        if (setting.inventory.requestPull && conn.peerPermissions?.inventory?.allowPull) {
-          initiateSyncWithPeer(conn, 'inventory');
-        }
+      console.log(`Handshake received from ${conn.peerName} (${conn.peerRole}) in org ${conn.orgUuid}`);
+
+      const isCEO = userRole === 'CEO' || userRole === 'Admin';
+      const isPeerCEO = conn.peerRole === 'CEO' || conn.peerRole === 'Admin';
+
+      if (conn.orgUuid === orgUuid) {
+          // Check if this member exists in our list
+          const existing = await getMemberByUuid(conn.peerUuid);
+          if (!existing) {
+              if (isCEO || userRole === 'Director') {
+                  // CEO/Director automatically adds new joiners as pending
+                  db.run("INSERT INTO org_members (uuid, name, role, status) VALUES (?, ?, ?, 'Pending')", [conn.peerUuid, conn.peerName, conn.peerRole], (err) => {
+                      if (err) console.error("Error adding member:", err);
+                      else if (mainWindow) mainWindow.webContents.send('members-updated');
+                  });
+              } else if (isPeerCEO || conn.peerRole === 'Director') {
+                  // If I'm a regular member/joiner, and I see a CEO/Director, add them as Accepted
+                  // and immediately pull the members list to detect when I've been accepted.
+                  // Mining/inventory are pulled only after acceptance to avoid leaking data to pending members.
+                  db.run("INSERT INTO org_members (uuid, name, role, status) VALUES (?, ?, ?, 'Accepted')", [conn.peerUuid, conn.peerName, conn.peerRole], (err) => {
+                      if (err) console.error("Error adding staff member:", err);
+                      else if (mainWindow) mainWindow.webContents.send('members-updated');
+                  });
+                  initiateSyncWithPeer(conn, 'members');
+              }
+          } else {
+              // Update name/role if changed (and I trust them)
+              // Actually, roles should only be updated from CEO -> Members
+              if (!isCEO && (isPeerCEO || conn.peerRole === 'Director')) {
+                  // I am a member, I should update my local knowledge of roles from CEO/Director
+                  db.run("UPDATE org_members SET role = ?, status = 'Accepted', name = ? WHERE uuid = ?", [conn.peerRole, conn.peerName, conn.peerUuid], (err) => {
+                      if (!err && mainWindow) mainWindow.webContents.send('members-updated');
+                  });
+                  // Re-sync all categories on reconnection to catch any missed updates
+                  initiateSyncWithPeer(conn, 'members');
+                  initiateSyncWithPeer(conn, 'mining');
+                  initiateSyncWithPeer(conn, 'inventory');
+              }
+          }
       }
       return;
     }
 
     if (message.type === 'sync-request') {
-      const category = message.category || 'mining'; // Default to mining for legacy compatibility
-      const mySettings = await getPeerSettings();
-      const setting = mySettings.find(p => p.uuid === conn.peerUuid);
+      if (conn.orgUuid !== orgUuid) return;
       
-      if (!setting || !setting[category] || !setting[category].allowPull) {
-        console.warn(`Sync request denied for peer ${conn.peerUuid || 'unknown'}. Permission '${category}.allowPull' not set.`);
-        return;
+      const category = message.category;
+      
+      // RBAC Push Logic (Response to request):
+      // CEO/Director: Serves everyone.
+      // Member/Miner: Serves CEO/Director.
+      
+      const isCEO = userRole === 'CEO' || userRole === 'Admin';
+      const isPeerCEO = conn.peerRole === 'CEO' || conn.peerRole === 'Admin';
+
+      let canServe = false;
+      if (isCEO || userRole === 'Director') {
+          canServe = true;
+      } else if (isPeerCEO || conn.peerRole === 'Director') {
+          canServe = true;
       }
+
+      if (!canServe) return;
 
       const peerLastSyncTime = message.lastSyncTime;
       const updates = await getDatabaseUpdates(peerLastSyncTime, category);
@@ -250,25 +435,41 @@ async function handleSyncData(conn, data) {
         timestamp: Date.now()
       }));
     } else if (message.type === 'sync-response') {
-      const category = message.category || 'mining';
-      const mySettings = await getPeerSettings();
-      const setting = mySettings.find(p => p.uuid === conn.peerUuid);
-
-      if (!setting || !setting[category] || !setting[category].requestPull || !conn.peerPermissions?.[category]?.allowPull) {
-        console.warn(`Sync response ignored from peer ${conn.peerUuid || 'unknown'}: Permission check failed for ${category}.`);
-        return;
+      if (conn.orgUuid !== orgUuid) return;
+      console.log(`Sync response received for ${message.category} from ${conn.peerName}`);
+      
+      await applyDatabaseUpdates(message.updates);
+      
+      // Special check: if my own role was updated in the members sync
+      if (message.updates.members) {
+          const myNewInfo = message.updates.members.find(m => m.uuid === localSyncUuid);
+          if (myNewInfo && myNewInfo.role !== userRole) {
+              userRole = myNewInfo.role;
+              db.run("UPDATE sync_settings SET value = ? WHERE key = 'user_role'", [userRole]);
+              if (mainWindow) mainWindow.webContents.send('role-updated', userRole);
+              broadcastHandshake(); // Tell everyone about our new role
+          }
+          if (myNewInfo && myNewInfo.status === 'Accepted' && setupCompleted) {
+              console.log("I HAVE BEEN ACCEPTED INTO THE ORG!");
+              if (mainWindow) mainWindow.webContents.send('setup-accepted');
+              broadcastHandshake(); // Inform peers we are now accepted
+              // Pull ALL historical data immediately using timestamp 0, so the user sees
+              // existing org data right away regardless of any prior members-only syncs.
+              for (const peer of peers) {
+                  if (peer.peerUuid && peer.orgUuid === orgUuid) {
+                      initiateSyncWithPeer(peer, 'mining', 0);
+                      initiateSyncWithPeer(peer, 'inventory', 0);
+                  }
+              }
+          }
       }
 
-      await applyDatabaseUpdates(message.updates);
       db.run("UPDATE sync_settings SET value = ? WHERE key = 'last_sync_time'", [message.timestamp.toString()]);
       if (mainWindow) mainWindow.webContents.send('sync-complete');
     } else if (message.type === 'sync-notification') {
-      const category = message.category || 'mining';
-      const mySettings = await getPeerSettings();
-      const setting = mySettings.find(p => p.uuid === conn.peerUuid);
-      if (setting && setting[category] && setting[category].requestPull && conn.peerPermissions?.[category]?.allowPull) {
-        await initiateSyncWithPeer(conn, category);
-      }
+      if (conn.orgUuid !== orgUuid) return;
+      console.log(`Sync notification received for ${message.category} from ${conn.peerName}`);
+      await initiateSyncWithPeer(conn, message.category);
     }
   } catch (err) {
     console.error('Failed to handle sync data:', err);
@@ -281,20 +482,24 @@ async function getDatabaseUpdates(sinceTimestamp, category) {
 
   if (category === 'mining') {
     updates.yields = await new Promise(resolve => {
-      db.all("SELECT * FROM yields WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
+      db.all("SELECT * FROM yields WHERE datetime(updated_at) > datetime(?)", [sinceStr], (err, rows) => resolve(rows || []));
     });
     updates.miners = await new Promise(resolve => {
-      db.all("SELECT * FROM miners WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
+      db.all("SELECT * FROM miners WHERE datetime(updated_at) > datetime(?)", [sinceStr], (err, rows) => resolve(rows || []));
     });
     updates.orders = await new Promise(resolve => {
-      db.all("SELECT * FROM orders WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
+      db.all("SELECT * FROM orders WHERE datetime(updated_at) > datetime(?)", [sinceStr], (err, rows) => resolve(rows || []));
     });
     updates.order_contributions = await new Promise(resolve => {
-      db.all("SELECT * FROM order_contributions WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
+      db.all("SELECT * FROM order_contributions WHERE datetime(updated_at) > datetime(?)", [sinceStr], (err, rows) => resolve(rows || []));
     });
   } else if (category === 'inventory') {
     updates.inventory = await new Promise(resolve => {
-      db.all("SELECT * FROM inventory WHERE updated_at > ?", [sinceStr], (err, rows) => resolve(rows || []));
+      db.all("SELECT * FROM inventory WHERE datetime(updated_at) > datetime(?)", [sinceStr], (err, rows) => resolve(rows || []));
+    });
+  } else if (category === 'members') {
+    updates.members = await new Promise(resolve => {
+      db.all("SELECT * FROM org_members WHERE datetime(updated_at) > datetime(?)", [sinceStr], (err, rows) => resolve(rows || []));
     });
   }
 
@@ -302,7 +507,27 @@ async function getDatabaseUpdates(sinceTimestamp, category) {
 }
 
 async function applyDatabaseUpdates(updates) {
-  const { yields, miners, orders, order_contributions, inventory } = updates;
+  const { yields, miners, orders, order_contributions, inventory, members } = updates;
+  let membersUpdated = false;
+
+  if (members) {
+      for (const m of members) {
+          await new Promise(resolve => {
+              db.get("SELECT updated_at FROM org_members WHERE uuid = ?", [m.uuid], (err, row) => {
+                  if (!row || new Date(m.updated_at) > new Date(row.updated_at)) {
+                      db.run("INSERT OR REPLACE INTO org_members (uuid, name, role, status, updated_at) VALUES (?, ?, ?, ?, ?)",
+                          [m.uuid, m.name, m.role, m.status, m.updated_at], () => {
+                              membersUpdated = true;
+                              resolve();
+                          });
+                  } else resolve();
+              });
+          });
+      }
+      if (membersUpdated && mainWindow) {
+          mainWindow.webContents.send('members-updated');
+      }
+  }
 
   if (miners) {
     for (const miner of miners) {
@@ -390,30 +615,6 @@ async function applyDatabaseUpdates(updates) {
   }
 }
 
-async function broadcastHandshake() {
-  const myPeerSettings = await getPeerSettings();
-  for (const conn of peers) {
-    const setting = myPeerSettings.find(p => p.uuid === conn.peerUuid);
-    const handshake = {
-      type: 'handshake',
-      uuid: localSyncUuid
-    };
-    
-    if (setting) {
-      handshake.intent = {
-        mining: setting.mining,
-        inventory: setting.inventory
-      };
-    }
-    
-    try {
-      conn.write(JSON.stringify(handshake));
-    } catch (err) {
-      console.error('Failed to broadcast handshake:', err);
-    }
-  }
-}
-
 ipcMain.handle('get-sync-settings', async () => {
   const settings = await new Promise(resolve => {
     const s = {};
@@ -429,88 +630,22 @@ ipcMain.handle('get-sync-settings', async () => {
       resolve(s);
     });
   });
-
-  // Ensure peer_uuids are migrated and returned
-  const peerSettings = await getPeerSettings();
-  settings.peer_uuids = JSON.stringify(peerSettings);
-  
-  if (!settings.local_sync_uuid && localSyncUuid) {
-    settings.local_sync_uuid = localSyncUuid;
-  }
   
   return settings;
 });
 
-ipcMain.handle('add-peer-uuid', async (event, peerUuid, nickname) => {
-  return new Promise(resolve => {
-    db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
-      const peerSettings = JSON.parse(row.value);
-      const existingPeer = peerSettings.find(p => {
-        if (typeof p === 'string') return p === peerUuid;
-        return p.uuid === peerUuid;
-      });
-
-      if (!existingPeer) {
-        peerSettings.push({ 
-          uuid: peerUuid, 
-          nickname: nickname,
-          mining: { allowPull: true, requestPull: true },
-          inventory: { allowPull: true, requestPull: true }
+async function getUserRole() {
+    if (userRole) return userRole;
+    return new Promise(resolve => {
+        db.get("SELECT value FROM sync_settings WHERE key = 'user_role'", (err, row) => {
+            resolve(row ? row.value : 'Member');
         });
-        db.run("UPDATE sync_settings SET value = ? WHERE key = 'peer_uuids'", [JSON.stringify(peerSettings)], () => {
-          const topic = crypto_node.createHash('sha256').update(peerUuid).digest();
-          if (swarm) swarm.join(topic, { lookup: true, announce: true });
-          broadcastHandshake();
-          resolve(true);
-        });
-      } else {
-        resolve(false);
-      }
     });
-  });
-});
-
-ipcMain.handle('update-peer-permission', async (event, peerUuid, category, permission, value) => {
-  return new Promise(resolve => {
-    db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
-      if (!row) return resolve(false);
-      let peerSettings = JSON.parse(row.value);
-      const peer = peerSettings.find(p => (typeof p === 'string' ? p : p.uuid) === peerUuid);
-      
-      if (peer && typeof peer === 'object') {
-        if (!peer[category]) peer[category] = { allowPull: true, requestPull: true };
-        peer[category][permission] = value;
-        db.run("UPDATE sync_settings SET value = ? WHERE key = 'peer_uuids'", [JSON.stringify(peerSettings)], () => {
-          broadcastHandshake();
-          resolve(true);
-        });
-      } else {
-        resolve(false);
-      }
-    });
-  });
-});
-
-ipcMain.handle('remove-peer-uuid', async (event, peerUuid) => {
-  return new Promise(resolve => {
-    db.get("SELECT value FROM sync_settings WHERE key = 'peer_uuids'", (err, row) => {
-      let peerUuids = JSON.parse(row.value);
-      peerUuids = peerUuids.filter(p => {
-        if (typeof p === 'string') return p !== peerUuid;
-        return p.uuid !== peerUuid;
-      });
-      db.run("UPDATE sync_settings SET value = ? WHERE key = 'peer_uuids'", [JSON.stringify(peerUuids)], () => {
-        const topic = crypto_node.createHash('sha256').update(peerUuid).digest();
-        if (swarm) swarm.leave(topic);
-        broadcastHandshake();
-        resolve(true);
-      });
-    });
-  });
-});
+}
 
 module.exports = {
   initSync,
   broadcastSync,
-  setMainWindow
+  setMainWindow,
+  getUserRole
 };
