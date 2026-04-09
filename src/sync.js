@@ -168,6 +168,17 @@ ipcMain.handle('update-member-role', async (event, { uuid, role }) => {
     throw new Error('Only the CEO can assign Directors or transfer ownership');
   }
 
+  // Directors cannot manage other Directors or CEOs — look up the target's current role
+  const targetMember = await new Promise((resolve, reject) => {
+    db.get("SELECT role FROM org_members WHERE uuid = ?", [uuid], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+  if (!isCEO && (targetMember?.role === 'Director' || targetMember?.role === 'CEO' || targetMember?.role === 'Admin')) {
+    throw new Error('Only the CEO can manage Directors');
+  }
+
   if (role === 'CEO') {
     return new Promise((resolve, reject) => {
       db.serialize(() => {

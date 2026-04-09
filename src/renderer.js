@@ -1155,17 +1155,16 @@ async function loadMembers() {
             const isTargetCEO = member.role === 'CEO' || member.role === 'Admin';
             
             let actions = '';
-            // Only CEO can assign Directors. Directors can only assign Miner/Member.
-            // Neither can manage a CEO.
-            if (!isMe && (isCEO || isDirector) && !isTargetCEO) {
+            // CEO can manage anyone who is not themselves.
+            // Directors can only manage Members and Miners (not other Directors or CEOs).
+            const isTargetDirector = member.role === 'Director';
+            const canManage = !isMe && !isTargetCEO && (isCEO || (isDirector && !isTargetDirector));
+            if (canManage) {
                 actions = `<select onchange="updateMemberRole('${member.uuid}', this.value)" class="miner-select" style="width: 120px; margin-right: 10px;">`;
-                
+
                 if (isCEO) {
                     actions += `<option value="CEO" ${member.role === 'CEO' ? 'selected' : ''}>CEO</option>`;
                     actions += `<option value="Director" ${member.role === 'Director' ? 'selected' : ''}>Director</option>`;
-                } else if (isDirector && member.role === 'Director') {
-                    // Show but don't allow changing IF it were possible to see another director
-                    actions += `<option value="Director" selected disabled>Director</option>`;
                 }
 
                 actions += `<option value="Member" ${member.role === 'Member' ? 'selected' : ''}>Member</option>`;
