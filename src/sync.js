@@ -623,9 +623,9 @@ async function applyDatabaseUpdates(updates) {
         db.get("SELECT updated_at, is_deleted FROM inventory WHERE uuid = ?", [item.uuid], (err, row) => {
           if (!row || new Date(item.updated_at) > new Date(row.updated_at)) {
             db.run(`
-              INSERT OR REPLACE INTO inventory (uuid, material, quality, quantity, location, updated_at, is_deleted)
-              VALUES (?, ?, ?, ?, ?, ?, ?)
-            `, [item.uuid, item.material, item.quality, item.quantity, item.location, item.updated_at, item.is_deleted], () => resolve());
+              INSERT OR REPLACE INTO inventory (uuid, material, quality, quantity, location, holder_uuid, updated_at, is_deleted)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `, [item.uuid, item.material, item.quality, item.quantity, item.location, item.holder_uuid || null, item.updated_at, item.is_deleted], () => resolve());
           } else {
             resolve();
           }

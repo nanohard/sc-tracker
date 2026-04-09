@@ -38,7 +38,7 @@ ipcMain.handle('get-inventory', async (event, sort) => {
   });
 });
 
-ipcMain.handle('transfer-to-inventory', async (event, { yieldId, location }) => {
+ipcMain.handle('transfer-to-inventory', async (event, { yieldId, location, holder_uuid }) => {
     // Only CEO, Admin and Director can transfer to inventory
     await checkRole(['CEO', 'Admin', 'Director']);
   const now = new Date().toISOString();
@@ -53,8 +53,8 @@ ipcMain.handle('transfer-to-inventory', async (event, { yieldId, location }) => 
         db.run('UPDATE yields SET is_deleted = 1, updated_at = ? WHERE id = ?', [now, yieldId]);
         const uuid = require('crypto').randomUUID();
         db.run(
-          'INSERT INTO inventory (uuid, material, quality, quantity, location, updated_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [uuid, row.material, row.quality, row.yield_cscu, location, now, 0],
+          'INSERT INTO inventory (uuid, material, quality, quantity, location, holder_uuid, updated_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [uuid, row.material, row.quality, row.yield_cscu, location, holder_uuid || null, now, 0],
           (err) => {
             if (err) reject(err);
             else {
@@ -77,6 +77,24 @@ ipcMain.handle('update-inventory', async (event, { id, quantity, location }) => 
     db.run(
       'UPDATE inventory SET quantity = ?, location = ?, updated_at = ? WHERE id = ?',
       [quantity, location, now, id],
+      (err) => {
+        if (err) reject(err);
+        else {
+          broadcastSync('inventory');
+          resolve(true);
+        }
+      }
+    );
+  });
+});
+
+ipcMain.handle('transfer-inventory-holder', async (event, { id, holder_uuid }) => {
+  await checkRole(['CEO', 'Admin', 'Director']);
+  const now = new Date().toISOString();
+  return new Promise((resolve, reject) => {
+    db.run(
+      'UPDATE inventory SET holder_uuid = ?, updated_at = ? WHERE id = ?',
+      [holder_uuid || null, now, id],
       (err) => {
         if (err) reject(err);
         else {

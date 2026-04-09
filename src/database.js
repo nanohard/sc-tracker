@@ -144,6 +144,11 @@ const initPromise = new Promise((resolve, reject) => {
               console.log("Adding location column to inventory table...");
               db.run("ALTER TABLE inventory ADD COLUMN location TEXT DEFAULT 'Unknown'");
             }
+            const hasHolderUuid = rows.some(r => r.name === 'holder_uuid');
+            if (!hasHolderUuid) {
+              console.log("Adding holder_uuid column to inventory table...");
+              db.run("ALTER TABLE inventory ADD COLUMN holder_uuid TEXT DEFAULT NULL");
+            }
           }
           createInventoryTable();
           createOrgMembersTable();
@@ -295,6 +300,7 @@ function createInventoryTable() {
     quality REAL,
     quantity REAL,
     location TEXT DEFAULT 'Unknown',
+    holder_uuid TEXT DEFAULT NULL,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     is_deleted BOOLEAN DEFAULT 0
   )`);

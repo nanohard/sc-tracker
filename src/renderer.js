@@ -2042,31 +2042,38 @@ async function loadInventory() {
         column: currentInventorySortColumn,
         order: currentInventorySortOrder
     });
+    const members = await ipcRenderer.invoke('get-org-members');
+    const memberMap = Object.fromEntries(members.map(m => [m.uuid, m.name]));
+
     inventoryBody.innerHTML = '';
-    
+
     if (inventory.length === 0) {
-        inventoryBody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Inventory is empty.</td></tr>';
+        inventoryBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">Inventory is empty.</td></tr>';
         return;
     }
 
     const isCEO = currentUserRole === 'CEO' || currentUserRole === 'Admin';
     const isDirector = currentUserRole === 'Director';
     const isStaff = isCEO || isDirector;
-    
+
     inventory.forEach(item => {
         const tr = document.createElement('tr');
         const displayQuality = item.quality !== null ? Math.round(item.quality).toString().padStart(3, '0') : '000';
         const displayQuantity = Math.round(item.quantity).toString();
         const displayLocation = item.location || 'Unknown';
-        
+        const holderName = item.holder_uuid ? (memberMap[item.holder_uuid] || 'Unknown') : 'Org Storage';
+        const holderUuidAttr = (item.holder_uuid || '').replace(/'/g, "\\'");
+
         tr.innerHTML = `
             <td>${item.material}</td>
             <td>${displayQuality}</td>
             <td>${displayQuantity}</td>
             <td>${displayLocation}</td>
+            <td>${holderName}</td>
             <td>
                 ${isStaff ? `
                     <button class="secondary" onclick="openInventoryEditModal(${item.id}, '${item.material.replace(/'/g, "\\'")}', ${item.quality}, ${item.quantity}, '${(item.location || 'Unknown').replace(/'/g, "\\'")}')">Edit</button>
+                    <button class="secondary" onclick="openReassignHolderModal(${item.id}, '${holderUuidAttr}')">Reassign</button>
                     <button class="danger" onclick="deleteInventory(${item.id})">Remove</button>
                 ` : '<span style="color: #888; font-style: italic;">View Only</span>'}
             </td>
@@ -2076,23 +2083,34 @@ async function loadInventory() {
 }
 
 window.transferToInventory = async (yieldId) => {
-    // Open the location selection modal instead of calling directly
     transferYieldId.value = yieldId;
-    transferLocationInput.value = globalLocationSelect.value || ''; // Pre-fill with global location if set
+    transferLocationInput.value = globalLocationSelect.value || '';
+    // Populate the holder dropdown with accepted org members
+    const members = await ipcRenderer.invoke('get-org-members');
+    const holderSelect = document.getElementById('transfer-holder');
+    holderSelect.innerHTML = '<option value="">— Org Storage —</option>';
+    members.filter(m => m.status === 'Accepted').forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.uuid;
+        opt.textContent = `${m.name} (${m.role})`;
+        holderSelect.appendChild(opt);
+    });
     transferModal.style.display = 'block';
 };
 
 transferConfirmBtn.onclick = async () => {
     const yieldId = transferYieldId.value;
     const location = transferLocationInput.value.trim();
-    
+
     if (!location) {
         await showModal('Please enter or select a location.');
         return;
     }
 
+    const holder_uuid = document.getElementById('transfer-holder').value || null;
+
     try {
-        await ipcRenderer.invoke('transfer-to-inventory', { yieldId, location });
+        await ipcRenderer.invoke('transfer-to-inventory', { yieldId, location, holder_uuid });
         transferModal.style.display = 'none';
         await refreshCurrentView();
     } catch (err) {
@@ -2102,6 +2120,37 @@ transferConfirmBtn.onclick = async () => {
 
 transferCancelBtn.onclick = () => {
     transferModal.style.display = 'none';
+};
+
+window.openReassignHolderModal = async (id, currentHolderUuid) => {
+    document.getElementById('reassign-inventory-id').value = id;
+    const members = await ipcRenderer.invoke('get-org-members');
+    const sel = document.getElementById('reassign-holder-select');
+    sel.innerHTML = '<option value="">— Org Storage —</option>';
+    members.filter(m => m.status === 'Accepted').forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.uuid;
+        opt.textContent = `${m.name} (${m.role})`;
+        if (m.uuid === currentHolderUuid) opt.selected = true;
+        sel.appendChild(opt);
+    });
+    document.getElementById('reassign-holder-modal').style.display = 'block';
+};
+
+document.getElementById('reassign-holder-confirm-btn').onclick = async () => {
+    const id = document.getElementById('reassign-inventory-id').value;
+    const holder_uuid = document.getElementById('reassign-holder-select').value || null;
+    try {
+        await ipcRenderer.invoke('transfer-inventory-holder', { id, holder_uuid });
+        document.getElementById('reassign-holder-modal').style.display = 'none';
+        loadInventory();
+    } catch (err) {
+        await showModal('Error reassigning holder: ' + err.message);
+    }
+};
+
+document.getElementById('reassign-holder-cancel-btn').onclick = () => {
+    document.getElementById('reassign-holder-modal').style.display = 'none';
 };
 
 window.deleteInventory = async (id) => {

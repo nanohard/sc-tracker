@@ -516,6 +516,7 @@
                         <th id="sort-inventory-quality" style="cursor: pointer;">Quality <span></span></th>
                         <th id="sort-inventory-quantity" style="cursor: pointer;">Quantity (cSCU) <span></span></th>
                         <th id="sort-inventory-location" style="cursor: pointer;">Location <span></span></th>
+                        <th>Held By</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -700,10 +701,33 @@
                         <label style="display: block; margin-bottom: 5px;">Select Location:</label>
                         <input type="text" id="transfer-location" list="location-list" style="width: 100%; box-sizing: border-box;" placeholder="Type or select location...">
                     </div>
+                    <div style="margin-bottom: 10px;">
+                        <label style="display: block; margin-bottom: 5px;">Held By:</label>
+                        <select id="transfer-holder" style="width: 100%; box-sizing: border-box;">
+                            <option value="">— Org Storage —</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="form-row" style="justify-content: flex-end; margin-top: 20px;">
                     <button id="transfer-confirm-btn">Confirm Transfer</button>
                     <button id="transfer-cancel-btn" class="secondary">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="reassign-holder-modal" style="display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7);">
+            <div style="background-color: #2d2d2d; margin: 15% auto; padding: 20px; border: 2px solid #00d2ff; width: 350px; border-radius: 8px; box-sizing: border-box;">
+                <h2 style="margin-top: 0;">Reassign Holder</h2>
+                <input type="hidden" id="reassign-inventory-id">
+                <div style="margin-bottom: 10px;">
+                    <label style="display: block; margin-bottom: 5px;">Transfer to:</label>
+                    <select id="reassign-holder-select" style="width: 100%; box-sizing: border-box;">
+                        <option value="">— Org Storage —</option>
+                    </select>
+                </div>
+                <div class="form-row" style="justify-content: flex-end; margin-top: 20px;">
+                    <button id="reassign-holder-confirm-btn">Confirm</button>
+                    <button id="reassign-holder-cancel-btn" class="secondary">Cancel</button>
                 </div>
             </div>
         </div>
