@@ -1474,6 +1474,7 @@ window.deleteYield = async (id) => {
 
 window.openEditModal = (id, material, quality, yield_cscu, miner_name, location, quantityOnly = false) => {
     editModal.dataset.isInventory = 'false';
+    editLocation.setAttribute('list', 'location-list');
     editModalTitle.textContent = 'Edit Record';
     editYieldLabel.textContent = 'Yield (cSCU):';
 
@@ -1510,6 +1511,7 @@ window.openEditModal = (id, material, quality, yield_cscu, miner_name, location,
 
 window.openInventoryEditModal = (id, material, quality, quantity, location) => {
     editModal.dataset.isInventory = 'true';
+    editLocation.setAttribute('list', 'storage-location-list');
     editModalTitle.textContent = 'Edit Inventory';
     editYieldLabel.textContent = 'Quantity (cSCU):';
     
