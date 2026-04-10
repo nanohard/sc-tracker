@@ -551,20 +551,37 @@
                 <button id="back-to-dash-from-inventory" class="secondary">← Return to Dashboard</button>
             </div>
             <h2 style="text-align: center;">Inventory</h2>
-            <table class="yield-list">
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px; justify-content: space-between;">
+                <input type="text" id="inventory-search" placeholder="Filter by material..." style="width: 220px; box-sizing: border-box;">
+                <div>
+                    <button id="inventory-view-detail" class="secondary">Detail View</button>
+                    <button id="inventory-view-summary">Summary View</button>
+                </div>
+            </div>
+            <table id="inventory-detail-table" class="yield-list">
                 <thead>
                     <tr>
                         <th id="sort-inventory-material" style="cursor: pointer;">Material <span></span></th>
                         <th id="sort-inventory-quality" style="cursor: pointer;">Quality <span></span></th>
                         <th id="sort-inventory-quantity" style="cursor: pointer;">Quantity (cSCU) <span></span></th>
                         <th id="sort-inventory-location" style="cursor: pointer;">Location <span></span></th>
-                        <th>Held By</th>
+                        <th id="sort-inventory-holder" style="cursor: pointer;">Held By <span></span></th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody id="inventory-body">
                     <!-- Inventory items will be loaded here -->
                 </tbody>
+            </table>
+            <table id="inventory-summary-table" class="yield-list" style="display: none;">
+                <thead>
+                    <tr>
+                        <th>Material</th>
+                        <th>Quality Band</th>
+                        <th>Total (cSCU)</th>
+                    </tr>
+                </thead>
+                <tbody id="inventory-summary-body"></tbody>
             </table>
         </div>
 

@@ -302,6 +302,11 @@ const sortInventoryMaterialHeader = document.getElementById('sort-inventory-mate
 const sortInventoryQualityHeader = document.getElementById('sort-inventory-quality');
 const sortInventoryQuantityHeader = document.getElementById('sort-inventory-quantity');
 const sortInventoryLocationHeader = document.getElementById('sort-inventory-location');
+const sortInventoryHolderHeader = document.getElementById('sort-inventory-holder');
+const inventorySearch = document.getElementById('inventory-search');
+const inventoryDetailTable = document.getElementById('inventory-detail-table');
+const inventorySummaryTable = document.getElementById('inventory-summary-table');
+const inventorySummaryBody = document.getElementById('inventory-summary-body');
 
 let currentViewedLocation = null;
 let currentSortColumn = 'quality';
@@ -315,6 +320,7 @@ let currentOreSortOrder = 'ASC';
 
 let currentInventorySortColumn = 'material';
 let currentInventorySortOrder = 'ASC';
+let currentInventoryView = 'detail';
 
 let lastProcessedImagePath = null;
 
@@ -698,6 +704,17 @@ if (sortInventoryLocationHeader) sortInventoryLocationHeader.addEventListener('c
     handleInventorySort('location');
 });
 
+if (sortInventoryHolderHeader) sortInventoryHolderHeader.addEventListener('click', () => {
+    handleInventorySort('holder');
+});
+
+if (inventorySearch) inventorySearch.addEventListener('input', loadInventory);
+
+const inventoryViewDetailBtn = document.getElementById('inventory-view-detail');
+const inventoryViewSummaryBtn = document.getElementById('inventory-view-summary');
+if (inventoryViewDetailBtn) inventoryViewDetailBtn.onclick = () => { currentInventoryView = 'detail'; loadInventory(); };
+if (inventoryViewSummaryBtn) inventoryViewSummaryBtn.onclick = () => { currentInventoryView = 'summary'; loadInventory(); };
+
 function handleSort(column) {
     if (currentSortColumn === column) {
         currentSortOrder = currentSortOrder === 'ASC' ? 'DESC' : 'ASC';
@@ -819,14 +836,16 @@ function updateInventorySortIndicators() {
     const qualityArrow = sortInventoryQualityHeader.querySelector('span');
     const quantityArrow = sortInventoryQuantityHeader.querySelector('span');
     const locationArrow = sortInventoryLocationHeader.querySelector('span');
-    
+    const holderArrow = sortInventoryHolderHeader ? sortInventoryHolderHeader.querySelector('span') : null;
+
     if (materialArrow) materialArrow.innerHTML = '&nbsp;';
     if (qualityArrow) qualityArrow.innerHTML = '&nbsp;';
     if (quantityArrow) quantityArrow.innerHTML = '&nbsp;';
     if (locationArrow) locationArrow.innerHTML = '&nbsp;';
-    
+    if (holderArrow) holderArrow.innerHTML = '&nbsp;';
+
     const indicator = currentInventorySortOrder === 'ASC' ? '▲' : '▼';
-    
+
     if (currentInventorySortColumn === 'material') {
         if (materialArrow) materialArrow.textContent = indicator;
     } else if (currentInventorySortColumn === 'quality') {
@@ -835,6 +854,8 @@ function updateInventorySortIndicators() {
         if (quantityArrow) quantityArrow.textContent = indicator;
     } else if (currentInventorySortColumn === 'location') {
         if (locationArrow) locationArrow.textContent = indicator;
+    } else if (currentInventorySortColumn === 'holder') {
+        if (holderArrow) holderArrow.textContent = indicator;
     }
 }
 
@@ -2040,14 +2061,58 @@ window.deleteOrder = async (uuid) => {
 };
 
 async function loadInventory() {
-    const inventory = await ipcRenderer.invoke('get-inventory', {
-        column: currentInventorySortColumn,
+    const sortColumn = currentInventorySortColumn === 'holder' ? 'material' : currentInventorySortColumn;
+    let inventory = await ipcRenderer.invoke('get-inventory', {
+        column: sortColumn,
         order: currentInventorySortOrder
     });
     const members = await ipcRenderer.invoke('get-org-members');
     const memberMap = Object.fromEntries(members.map(m => [m.uuid, m.name]));
 
+    // Apply search filter
+    const filter = inventorySearch ? inventorySearch.value.trim().toLowerCase() : '';
+    if (filter) {
+        inventory = inventory.filter(item => item.material.toLowerCase().includes(filter));
+    }
+
+    // Apply client-side holder sort
+    if (currentInventorySortColumn === 'holder') {
+        inventory.sort((a, b) => {
+            const aName = a.holder_uuid ? (memberMap[a.holder_uuid] || 'Unknown') : 'Org Storage';
+            const bName = b.holder_uuid ? (memberMap[b.holder_uuid] || 'Unknown') : 'Org Storage';
+            return currentInventorySortOrder === 'ASC' ? aName.localeCompare(bName) : bName.localeCompare(aName);
+        });
+    }
+
     inventoryBody.innerHTML = '';
+    if (inventorySummaryBody) inventorySummaryBody.innerHTML = '';
+
+    // Toggle table visibility
+    if (inventoryDetailTable) inventoryDetailTable.style.display = currentInventoryView === 'detail' ? '' : 'none';
+    if (inventorySummaryTable) inventorySummaryTable.style.display = currentInventoryView === 'summary' ? '' : 'none';
+
+    if (currentInventoryView === 'summary') {
+        if (inventory.length === 0) {
+            if (inventorySummaryBody) inventorySummaryBody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: #888;">Inventory is empty.</td></tr>';
+            return;
+        }
+        const groups = {};
+        inventory.forEach(item => {
+            const band = Math.floor((item.quality || 0) / 100) * 100;
+            const key = `${item.material}||${band}`;
+            if (!groups[key]) groups[key] = { material: item.material, band, total: 0 };
+            groups[key].total += item.quantity;
+        });
+        const sorted = Object.values(groups).sort((a, b) =>
+            a.material.localeCompare(b.material) || a.band - b.band
+        );
+        sorted.forEach(g => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td>${g.material}</td><td>${g.band}s</td><td>${Math.round(g.total)}</td>`;
+            inventorySummaryBody.appendChild(tr);
+        });
+        return;
+    }
 
     if (inventory.length === 0) {
         inventoryBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">Inventory is empty.</td></tr>';
